@@ -1,0 +1,93 @@
+import asyncio
+import sys
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
+from loguru import logger
+
+from lib.cron import process_scraped_images_for_embeddings
+from lib.faiss_manager import images_faiss_manager, videos_faiss_manager
+from routes.get_matching_images import router as get_matching_images_router
+from routes.get_matching_videos import router as get_matching_videos_router
+from routes.get_whois import router as get_whois_router
+from routes.recheck_images import router as recheck_images_router
+from routes.verify_photo import router as verify_photo_router
+
+logger.remove()
+
+logger.add(sys.stdout, level="INFO")
+
+background_task = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global background_task
+
+    try:
+        images_stats = images_faiss_manager.get_stats()
+        logger.info(f"Images FAISS index loaded: {images_stats}")
+
+        if images_stats["total_embeddings"] == 0:
+            images_faiss_manager.rebuild_images_index_from_db()
+
+        videos_stats = videos_faiss_manager.get_stats()
+        logger.info(f"Videos FAISS index loaded: {videos_stats}")
+
+        if videos_stats["total_embeddings"] == 0:
+            videos_faiss_manager.rebuild_video_index_from_db()
+
+        background_task = asyncio.create_task(process_scraped_images_for_embeddings())
+
+    except Exception as e:
+        logger.error(f"Error during startup: {e}")
+
+    yield
+
+    if background_task:
+        background_task.cancel()
+
+        try:
+            await background_task
+
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(get_matching_images_router)
+app.include_router(get_matching_videos_router)
+app.include_router(get_whois_router)
+app.include_router(verify_photo_router)
+app.include_router(recheck_images_router)
+
+
+app.mount("/videos", StaticFiles(directory="videos"), name="videos")
+
+
+@app.get("/")
+async def root():
+    return {"success": True, "message": "Hello World!"}
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    svg_content = """
+    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+        <text x="50%" y="50%" font-size="24" text-anchor="middle" dy=".35em">💫</text>
+    </svg>
+    """
+
+    return Response(content=svg_content, media_type="image/svg+xml")

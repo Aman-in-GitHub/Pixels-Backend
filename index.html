@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pixels API Test</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: "JetBrains Mono", monospace;
+        padding: 20px;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin-bottom: 10px;
+      }
+
+      input[type="file"] {
+        display: none;
+      }
+
+      input[type="text"] {
+        width: 100%;
+        padding: 5px;
+        border: 1px solid #000;
+        font-family: "JetBrains Mono", monospace;
+      }
+
+      button {
+        padding: 10px 20px;
+        border: 1px solid #000;
+        background: #fff;
+        cursor: pointer;
+        font-family: "JetBrains Mono", monospace;
+        margin-right: 10px;
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      button.active {
+        background: #000;
+        color: #fff;
+      }
+
+      img {
+        max-width: 250px;
+        border: 1px solid #000;
+      }
+
+      video {
+        height: 500px;
+        max-width: 500px;
+        width: 100%;
+        border: 1px solid #000;
+        margin-bottom: 10px;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      .section {
+        margin-bottom: 30px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #000;
+      }
+
+      .tabs {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 20px;
+      }
+
+      .match-card {
+        border: 1px solid #000;
+        padding: 10px;
+        margin-bottom: 20px;
+      }
+
+      .match-images {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+
+      .match-images img {
+        max-width: 400px;
+      }
+
+      .video-card {
+        border: 1px solid #000;
+        padding: 10px;
+        margin-bottom: 20px;
+      }
+
+      .video-player-container {
+        margin-bottom: 15px;
+      }
+
+      .timestamps {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 10px;
+      }
+
+      .timestamp {
+        background: #f0f0f0;
+        padding: 5px 10px;
+        border: 1px solid #000;
+        font-size: 12px;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+
+      .timestamp:hover {
+        background: #e0e0e0;
+      }
+
+      .timestamp:active {
+        background: #d0d0d0;
+      }
+
+      pre {
+        background: #f0f0f0;
+        padding: 10px;
+        overflow-x: auto;
+        font-size: 11px;
+      }
+
+      .upload-box {
+        border: 2px dashed #000;
+        padding: 40px;
+        text-align: center;
+        cursor: pointer;
+        margin-bottom: 10px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Pixels API Test</h1>
+
+    <div class="section">
+      <div class="tabs">
+        <button id="imagesTab" class="active" onclick="switchTab('images')">Search Images</button>
+        <button id="videosTab" onclick="switchTab('videos')">Search Videos</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <label>API Endpoint:</label>
+      <input
+        type="text"
+        id="apiUrl"
+        value="https://pixels-backend.whatsablackbeatleanywayafuckingroach.qzz.io/get-matching-images"
+      />
+    </div>
+
+    <div class="section">
+      <div class="upload-box" id="uploadBox">
+        <p>Drop image here or click to browse</p>
+        <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" />
+      </div>
+      <button id="uploadBtn" disabled>Upload & Search</button>
+      <button id="resetBtn" class="hidden">Reset</button>
+    </div>
+
+    <div id="previewSection" class="section hidden">
+      <h3>Selected Image</h3>
+      <img id="selectedImage" alt="Selected image" />
+    </div>
+
+    <div id="resultsSection" class="hidden">
+      <div class="section">
+        <h2>Results</h2>
+        <div id="statusInfo"></div>
+        <div id="loadingIndicator" class="hidden">
+          <p>Processing...</p>
+        </div>
+      </div>
+
+      <div id="boundedInputContainer" class="section hidden">
+        <h3>Input Image with Face Detection</h3>
+        <img id="boundedInputImage" alt="Input with face detection" />
+      </div>
+
+      <div id="errorContainer"></div>
+      <div id="matchesContainer"></div>
+    </div>
+
+    <script>
+      let selectedFile = null;
+      let currentMode = "images";
+
+      const uploadBox = document.getElementById("uploadBox");
+      const fileInput = document.getElementById("fileInput");
+      const uploadBtn = document.getElementById("uploadBtn");
+      const resetBtn = document.getElementById("resetBtn");
+      const previewSection = document.getElementById("previewSection");
+      const selectedImage = document.getElementById("selectedImage");
+      const resultsSection = document.getElementById("resultsSection");
+      const apiUrlInput = document.getElementById("apiUrl");
+      const imagesTab = document.getElementById("imagesTab");
+      const videosTab = document.getElementById("videosTab");
+
+      function switchTab(mode) {
+        currentMode = mode;
+
+        if (mode === "images") {
+          imagesTab.classList.add("active");
+          videosTab.classList.remove("active");
+          apiUrlInput.value =
+            "https://pixels-backend.whatsablackbeatleanywayafuckingroach.qzz.io/get-matching-images";
+        } else {
+          videosTab.classList.add("active");
+          imagesTab.classList.remove("active");
+          apiUrlInput.value =
+            "https://pixels-backend.whatsablackbeatleanywayafuckingroach.qzz.io/get-matching-videos";
+        }
+
+        resetForm();
+      }
+
+      uploadBox.addEventListener("click", function () {
+        fileInput.click();
+      });
+
+      uploadBox.addEventListener("dragover", function (e) {
+        e.preventDefault();
+      });
+
+      uploadBox.addEventListener("drop", function (e) {
+        e.preventDefault();
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+          handleFileSelect(files[0]);
+        }
+      });
+
+      fileInput.addEventListener("change", function (e) {
+        if (e.target.files.length > 0) {
+          handleFileSelect(e.target.files[0]);
+        }
+      });
+
+      uploadBtn.addEventListener("click", uploadAndSearch);
+      resetBtn.addEventListener("click", resetForm);
+
+      function handleFileSelect(file) {
+        const validTypes = ["image/jpeg", "image/png", "image/webp"];
+
+        if (!validTypes.includes(file.type)) {
+          alert("Please select a valid image file (JPG, PNG, or WEBP)");
+          return;
+        }
+
+        if (file.size > 10 * 1024 * 1024) {
+          alert("File size must be less than 10MB");
+          return;
+        }
+
+        selectedFile = file;
+        uploadBtn.disabled = false;
+
+        const reader = new FileReader();
+        reader.onload = function (e) {
+          selectedImage.src = e.target.result;
+          previewSection.classList.remove("hidden");
+        };
+        reader.readAsDataURL(file);
+      }
+
+      async function uploadAndSearch() {
+        if (!selectedFile) return;
+
+        const apiUrl = apiUrlInput.value.trim();
+        if (!apiUrl) {
+          alert("Please enter an API endpoint URL");
+          return;
+        }
+
+        uploadBtn.disabled = true;
+        resultsSection.classList.remove("hidden");
+        document.getElementById("loadingIndicator").classList.remove("hidden");
+        document.getElementById("errorContainer").innerHTML = "";
+        document.getElementById("matchesContainer").innerHTML = "";
+        document.getElementById("statusInfo").innerHTML = "";
+        document.getElementById("boundedInputContainer").classList.add("hidden");
+
+        const formData = new FormData();
+        formData.append("file", selectedFile);
+
+        try {
+          const response = await fetch(apiUrl, {
+            method: "POST",
+            body: formData,
+          });
+
+          const data = await response.json();
+
+          document.getElementById("loadingIndicator").classList.add("hidden");
+
+          if (currentMode === "images") {
+            displayImageResults(data);
+          } else {
+            displayVideoResults(data);
+          }
+
+          resetBtn.classList.remove("hidden");
+        } catch (error) {
+          document.getElementById("loadingIndicator").classList.add("hidden");
+          displayError("Network error: " + error.message);
+          uploadBtn.disabled = false;
+        }
+      }
+
+      function displayImageResults(data) {
+        const statusInfo = document.getElementById("statusInfo");
+        const errorContainer = document.getElementById("errorContainer");
+        const matchesContainer = document.getElementById("matchesContainer");
+
+        if (data.success) {
+          statusInfo.innerHTML = `
+                    <p>✓ Success: ${data.message}</p>
+                    <p>Total Matches: ${data.total_matches || 0}</p>
+                `;
+
+          if (data.bounded_input_image) {
+            document.getElementById("boundedInputImage").src = data.bounded_input_image;
+            document.getElementById("boundedInputContainer").classList.remove("hidden");
+          }
+
+          if (data.matching_images && data.matching_images.length > 0) {
+            matchesContainer.innerHTML = data.matching_images
+              .map((match, index) => createMatchCard(match, index))
+              .join("");
+          }
+        } else {
+          statusInfo.innerHTML = `<p>✗ Error: ${data.message}</p>`;
+          displayError(data.message);
+        }
+
+        matchesContainer.innerHTML += `
+                <div class="section">
+                    <h3>Raw API Response</h3>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                </div>
+            `;
+      }
+
+      function displayVideoResults(data) {
+        const statusInfo = document.getElementById("statusInfo");
+        const errorContainer = document.getElementById("errorContainer");
+        const matchesContainer = document.getElementById("matchesContainer");
+
+        if (data.success) {
+          statusInfo.innerHTML = `
+                    <p>✓ Success: Found ${data.total_matches || 0} matching video(s)</p>
+                `;
+
+          if (data.matching_videos && data.matching_videos.length > 0) {
+            matchesContainer.innerHTML = data.matching_videos
+              .map((video, index) => createVideoCard(video, index))
+              .join("");
+          }
+        } else {
+          statusInfo.innerHTML = `<p>✗ Error: ${data.message}</p>`;
+          displayError(data.message);
+        }
+
+        matchesContainer.innerHTML += `
+                <div class="section">
+                    <h3>Raw API Response</h3>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                </div>
+            `;
+      }
+
+      function createMatchCard(match, index) {
+        return `
+                <div class="match-card">
+                    <h3>Match #${index + 1}</h3>
+                    <div class="match-images">
+                        ${match.raw_image ? `<img src="${match.raw_image.src}" alt="Original">` : "<div>No Raw Image</div>"}
+                        ${match.bounded_image ? `<img src="${match.bounded_image}" alt="Bounded">` : "<div>No Bounded Image</div>"}
+                    </div>
+                    <p>NSFW Score: ${(match.nsfw_score || 0).toFixed(3)}</p>
+                    ${match.url ? `<p>URL: ${match.url}</p>` : ""}
+                    ${match.raw_image ? `<p>Size: ${match.raw_image.width} x ${match.raw_image.height}</p>` : ""}
+                    ${match.raw_image && match.raw_image.alt ? `<p>Alt: ${match.raw_image.alt}</p>` : ""}
+                    <details>
+                        <summary>Raw Data</summary>
+                        <pre>${JSON.stringify(match, null, 2)}</pre>
+                    </details>
+                </div>
+            `;
+      }
+
+      function createVideoCard(video, index) {
+        const videoId = `video-${index}`;
+        const timestampsHtml =
+          video.timestamps && video.timestamps.length > 0
+            ? video.timestamps
+                .map(
+                  (ts) =>
+                    `<span class="timestamp" onclick="seekToTimestamp('${videoId}', ${ts})">${formatTimestamp(ts)}</span>`,
+                )
+                .join("")
+            : '<span class="timestamp">No timestamps</span>';
+
+        return `
+                <div class="video-card">
+                    <h3>Video Match #${index + 1}</h3>
+                    <div class="video-player-container">
+                        <video id="${videoId}" controls>
+                            <source src="${video.embedded_video}" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <p><strong>Video:</strong> ${video.embedded_video || "N/A"}</p>
+                    <p><strong>Occurrences:</strong> ${video.occurrences || 0}</p>
+                    ${video.url ? `<p><strong>URL:</strong> ${video.url}</p>` : ""}
+                    ${video.title ? `<p><strong>Title:</strong> ${video.title}</p>` : ""}
+                    ${video.hostname ? `<p><strong>Hostname:</strong> ${video.hostname}</p>` : ""}
+                    ${video.domain ? `<p><strong>Domain:</strong> ${video.domain}</p>` : ""}
+                    ${video.match_score ? `<p><strong>Match Score:</strong> ${video.match_score.toFixed(3)}</p>` : ""}
+                    <div>
+                        <strong>Timestamps (click to jump):</strong>
+                        <div class="timestamps">
+                            ${timestampsHtml}
+                        </div>
+                    </div>
+                    <details>
+                        <summary>Raw Data</summary>
+                        <pre>${JSON.stringify(video, null, 2)}</pre>
+                    </details>
+                </div>
+            `;
+      }
+
+      function seekToTimestamp(videoId, timestamp) {
+        const videoElement = document.getElementById(videoId);
+        if (videoElement) {
+          if (videoElement.readyState >= 2) {
+            videoElement.currentTime = timestamp;
+            videoElement.play();
+          } else {
+            videoElement.addEventListener(
+              "loadedmetadata",
+              function () {
+                videoElement.currentTime = timestamp;
+                videoElement.play();
+              },
+              { once: true },
+            );
+
+            videoElement.load();
+          }
+        }
+      }
+
+      function formatTimestamp(seconds) {
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${secs.toString().padStart(2, "0")}`;
+      }
+
+      function displayError(message) {
+        document.getElementById("errorContainer").innerHTML = `
+                <div class="section">
+                    <p>Error: ${message}</p>
+                </div>
+            `;
+      }
+
+      function resetForm() {
+        selectedFile = null;
+        fileInput.value = "";
+        uploadBtn.disabled = true;
+        resetBtn.classList.add("hidden");
+        previewSection.classList.add("hidden");
+        resultsSection.classList.add("hidden");
+        document.getElementById("errorContainer").innerHTML = "";
+        document.getElementById("matchesContainer").innerHTML = "";
+      }
+    </script>
+  </body>
+</html>
