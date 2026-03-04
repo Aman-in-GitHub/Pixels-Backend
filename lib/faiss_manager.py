@@ -1,11 +1,14 @@
 import pickle
 from pathlib import Path
+from typing import Any, TypeAlias
 
 import faiss
 import numpy as np
 from loguru import logger
 
-from lib.supabase_client import supabase
+from lib.db import fetch_embedded_image_ids, fetch_embedding_rows
+
+RecordData: TypeAlias = dict[str, Any]
 
 
 class FAISSManager:
@@ -16,21 +19,39 @@ class FAISSManager:
 
         self.metadata_path = Path(metadata_path)
 
-        self.index = None
+        self.index: Any | None = None
 
-        self.metadata = {}
+        self.metadata: dict[int, RecordData] = {}
 
         self.embedding_dimension = 512
 
         self._load_or_create_index()
 
-    def _load_or_create_index(self):
+    def _load_or_create_index(self) -> None:
         if self.index_path.exists():
             try:
                 self.index = faiss.read_index(str(self.index_path))
 
                 with open(self.metadata_path, "rb") as f:
-                    self.metadata = pickle.load(f)
+                    loaded_metadata = pickle.load(f)
+
+                if isinstance(loaded_metadata, dict):
+                    sanitized_metadata: dict[int, RecordData] = {}
+                    for key, value in loaded_metadata.items():
+                        if not isinstance(value, dict):
+                            continue
+                        try:
+                            sanitized_key = int(key)
+                        except (TypeError, ValueError):
+                            continue
+                        sanitized_metadata[sanitized_key] = value
+
+                    self.metadata = sanitized_metadata
+                else:
+                    logger.warning(
+                        "Invalid metadata format detected; resetting metadata"
+                    )
+                    self.metadata = {}
 
             except Exception as e:
                 logger.error(f"Error loading index: {e}")
@@ -38,29 +59,30 @@ class FAISSManager:
         else:
             self._create_new_index()
 
-    def _create_new_index(self):
+    def _create_new_index(self) -> None:
         self.index = faiss.IndexFlatIP(self.embedding_dimension)
 
         self.metadata = {}
 
-    def _normalize_embeddings(self, embeddings):
+    def _normalize_embeddings(self, embeddings: list[Any]) -> np.ndarray:
         embeddings_array = np.array(embeddings, dtype=np.float32)
 
         faiss.normalize_L2(embeddings_array)
 
         return embeddings_array
 
-    def _get_existing_ids(self):
+    def _require_index(self) -> Any:
+        if self.index is None:
+            raise RuntimeError("FAISS index is not initialized")
+        return self.index
+
+    async def _get_existing_ids(self) -> set[Any]:
         local_ids = {
             meta.get("id") for meta in self.metadata.values() if meta.get("id")
         }
 
         try:
-            response = supabase.table("embedded_images").select("id").execute()
-
-            db_ids = (
-                {record["id"] for record in response.data} if response.data else set()
-            )
+            db_ids = await fetch_embedded_image_ids()
 
             return local_ids | db_ids
 
@@ -68,13 +90,15 @@ class FAISSManager:
             logger.error(f"Error getting existing IDs: {e}")
             return local_ids
 
-    def add_embeddings(self, embeddings, records):
+    async def add_embeddings(
+        self, embeddings: list[Any], records: list[RecordData]
+    ) -> None:
         if not embeddings or not records:
             logger.warning("No embeddings or records provided")
             return
 
         try:
-            existing_ids = self._get_existing_ids()
+            existing_ids = await self._get_existing_ids()
 
             new_embeddings, new_records = [], []
 
@@ -90,9 +114,11 @@ class FAISSManager:
 
             normalized_embeddings = self._normalize_embeddings(new_embeddings)
 
-            start_idx = self.index.ntotal
+            index = self._require_index()
 
-            self.index.add(normalized_embeddings)
+            start_idx = index.ntotal
+
+            index.add(normalized_embeddings)
 
             for i, record in enumerate(new_records):
                 self.metadata[start_idx + i] = record
@@ -104,23 +130,25 @@ class FAISSManager:
         except Exception as e:
             logger.error(f"Error adding embeddings: {e}")
 
-    def search_matching_images(self, query_embedding, k=100, threshold=0.3):
-        if not self.index or self.index.ntotal == 0:
+    def search_matching_images(
+        self, query_embedding: list[float], k: int = 100, threshold: float = 0.3
+    ) -> list[RecordData]:
+        index = self.index
+        if index is None or index.ntotal == 0:
             logger.warning("FAISS index is empty")
             return []
 
         try:
             query_normalized = self._normalize_embeddings([query_embedding])
 
-            scores, indices = self.index.search(
-                query_normalized, min(k, self.index.ntotal)
-            )
+            scores, indices = index.search(query_normalized, min(k, index.ntotal))
 
-            results = []
+            results: list[RecordData] = []
 
             for score, idx in zip(scores[0], indices[0]):
                 if idx != -1 and score >= threshold:
-                    result = self.metadata.get(idx, {}).copy()
+                    metadata_item = self.metadata.get(int(idx), {})
+                    result = metadata_item.copy()
 
                     result["match_score"] = float(score)
 
@@ -132,9 +160,9 @@ class FAISSManager:
             logger.error(f"Error searching index: {e}")
             return []
 
-    def save_index(self):
+    def save_index(self) -> None:
         try:
-            faiss.write_index(self.index, str(self.index_path))
+            faiss.write_index(self._require_index(), str(self.index_path))
 
             with open(self.metadata_path, "wb") as f:
                 pickle.dump(self.metadata, f)
@@ -142,41 +170,41 @@ class FAISSManager:
         except Exception as e:
             logger.error(f"Error saving index: {e}")
 
-    def rebuild_images_index_from_db(self, batch_size=100000):
+    async def rebuild_images_index_from_db(self, batch_size: int = 100000) -> None:
         logger.info("Rebuilding FAISS images index from database...")
 
         try:
             self._create_new_index()
+            index = self._require_index()
 
             processed = 0
 
             offset = 0
 
             while True:
-                response = (
-                    supabase.table("embedded_images")
-                    .select("*")
-                    .range(offset, offset + batch_size - 1)
-                    .execute()
+                rows = await fetch_embedding_rows(
+                    table_name="embedded_images",
+                    limit=batch_size,
+                    offset=offset,
                 )
 
-                if not response.data:
+                if not rows:
                     break
 
                 embeddings, records = [], []
 
-                for record in response.data:
-                    if record.get("embedding"):
-                        embeddings.append(record["embedding"])
-
+                for record in rows:
+                    embedding = record.get("embedding")
+                    if isinstance(embedding, (list, tuple, np.ndarray)):
+                        embeddings.append(embedding)
                         records.append(record)
 
                 if embeddings:
                     normalized = self._normalize_embeddings(embeddings)
 
-                    start_idx = self.index.ntotal
+                    start_idx = index.ntotal
 
-                    self.index.add(normalized)
+                    index.add(normalized)
 
                     for i, record in enumerate(records):
                         self.metadata[start_idx + i] = record
@@ -185,7 +213,7 @@ class FAISSManager:
 
                 offset += batch_size
 
-                if len(response.data) < batch_size:
+                if len(rows) < batch_size:
                     break
 
             self.save_index()
@@ -195,41 +223,41 @@ class FAISSManager:
         except Exception as e:
             logger.error(f"Error rebuilding images index: {e}")
 
-    def rebuild_video_index_from_db(self, batch_size=100000):
+    async def rebuild_video_index_from_db(self, batch_size: int = 100000) -> None:
         logger.info("Rebuilding FAISS video index from database...")
 
         try:
             self._create_new_index()
+            index = self._require_index()
 
             processed = 0
 
             offset = 0
 
             while True:
-                response = (
-                    supabase.table("embedded_videos")
-                    .select("*")
-                    .range(offset, offset + batch_size - 1)
-                    .execute()
+                rows = await fetch_embedding_rows(
+                    table_name="embedded_videos",
+                    limit=batch_size,
+                    offset=offset,
                 )
 
-                if not response.data:
+                if not rows:
                     break
 
                 embeddings, records = [], []
 
-                for record in response.data:
-                    if record.get("embedding"):
-                        embeddings.append(record["embedding"])
-
+                for record in rows:
+                    embedding = record.get("embedding")
+                    if isinstance(embedding, (list, tuple, np.ndarray)):
+                        embeddings.append(embedding)
                         records.append(record)
 
                 if embeddings:
                     normalized = self._normalize_embeddings(embeddings)
 
-                    start_idx = self.index.ntotal
+                    start_idx = index.ntotal
 
-                    self.index.add(normalized)
+                    index.add(normalized)
 
                     for i, record in enumerate(records):
                         self.metadata[start_idx + i] = record
@@ -238,7 +266,7 @@ class FAISSManager:
 
                 offset += batch_size
 
-                if len(response.data) < batch_size:
+                if len(rows) < batch_size:
                     break
 
             self.save_index()
@@ -248,11 +276,12 @@ class FAISSManager:
         except Exception as e:
             logger.error(f"Error rebuilding video index: {e}")
 
-    def get_stats(self):
+    def get_stats(self) -> dict[str, Any]:
+        index = self.index
         return {
-            "total_embeddings": self.index.ntotal if self.index else 0,
+            "total_embeddings": index.ntotal if index is not None else 0,
             "embedding_dimension": self.embedding_dimension,
-            "index_type": type(self.index).__name__ if self.index else None,
+            "index_type": type(index).__name__ if index is not None else None,
         }
 
 

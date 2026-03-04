@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from lib.cron import process_scraped_images_for_embeddings
+from lib.db import close_db_pool, init_db_pool
 from lib.faiss_manager import images_faiss_manager, videos_faiss_manager
 from routes.get_matching_images import router as get_matching_images_router
 from routes.get_matching_videos import router as get_matching_videos_router
@@ -28,17 +29,19 @@ async def lifespan(app: FastAPI):
     global background_task
 
     try:
+        await init_db_pool()
+
         images_stats = images_faiss_manager.get_stats()
         logger.info(f"Images FAISS index loaded: {images_stats}")
 
         if images_stats["total_embeddings"] == 0:
-            images_faiss_manager.rebuild_images_index_from_db()
+            await images_faiss_manager.rebuild_images_index_from_db()
 
         videos_stats = videos_faiss_manager.get_stats()
         logger.info(f"Videos FAISS index loaded: {videos_stats}")
 
         if videos_stats["total_embeddings"] == 0:
-            videos_faiss_manager.rebuild_video_index_from_db()
+            await videos_faiss_manager.rebuild_video_index_from_db()
 
         background_task = asyncio.create_task(process_scraped_images_for_embeddings())
 
@@ -55,6 +58,8 @@ async def lifespan(app: FastAPI):
 
         except asyncio.CancelledError:
             pass
+
+    await close_db_pool()
 
 
 app = FastAPI(lifespan=lifespan)

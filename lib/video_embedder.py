@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import cv2
@@ -6,9 +7,9 @@ from loguru import logger
 from PIL import Image
 
 from lib.constants import MAX_VIDEO_DURATION, MIN_CONFIDENCE
+from lib.db import insert_embedded_videos
 from lib.face_analyzer import face_analyzer
 from lib.faiss_manager import videos_faiss_manager
-from lib.supabase_client import supabase
 
 
 def compute_frame_hash(frame):
@@ -241,7 +242,7 @@ def create_video_embedding_record(
         return None
 
 
-def add_video_embeddings_to_faiss(video_embeddings_data):
+async def add_video_embeddings_to_faiss(video_embeddings_data):
     if not video_embeddings_data:
         logger.warning("No video embeddings data provided")
         return False
@@ -268,14 +269,14 @@ def add_video_embeddings_to_faiss(video_embeddings_data):
                 chunk = records_list[i : i + chunk_size]
 
                 try:
-                    supabase.table("embedded_videos").insert(chunk).execute()
+                    inserted = await insert_embedded_videos(chunk)
 
-                    logger.info(f"Inserted {len(chunk)} video embeddings to database")
+                    logger.info(f"Inserted {inserted} video embeddings to database")
 
                 except Exception as e:
                     logger.error(f"Error inserting chunk: {e}")
 
-        videos_faiss_manager.rebuild_video_index_from_db()
+        await videos_faiss_manager.rebuild_video_index_from_db()
 
         logger.info(
             f"Processing complete: {len(records_list)} video embeddings inserted"
@@ -287,7 +288,7 @@ def add_video_embeddings_to_faiss(video_embeddings_data):
         return False
 
 
-def process_videos_from_folder(videos_folder_path, frame_interval=30):
+async def process_videos_from_folder_async(videos_folder_path, frame_interval=30):
     if not os.path.exists(videos_folder_path):
         logger.error(f"Videos folder not found: {videos_folder_path}")
         return False
@@ -314,11 +315,11 @@ def process_videos_from_folder(videos_folder_path, frame_interval=30):
         )
 
         scraped_record = {
-            "url": "https://angiedevfolio.pages.dev",
-            "hostname": "angiedevfolio.pages.dev",
-            "domain": "pages.dev",
-            "title": "Angie Portfolio",
-            "favicon": "https://angiedevfolio.pages.dev/favicon.svg",
+            "url": "https://amanchand.com.np",
+            "hostname": "amanchand.com.np",
+            "domain": ".com.np",
+            "title": "Aman",
+            "favicon": "https://amanchand.com.np/favicon.ico",
         }
 
         embeddings = create_embedding_from_videos(
@@ -328,7 +329,7 @@ def process_videos_from_folder(videos_folder_path, frame_interval=30):
         )
 
         if embeddings:
-            success = add_video_embeddings_to_faiss(embeddings)
+            success = await add_video_embeddings_to_faiss(embeddings)
 
             if success:
                 total_embeddings += len(embeddings)
@@ -346,6 +347,12 @@ def process_videos_from_folder(videos_folder_path, frame_interval=30):
     return True
 
 
+def process_videos_from_folder(videos_folder_path, frame_interval=30):
+    return asyncio.run(
+        process_videos_from_folder_async(videos_folder_path, frame_interval)
+    )
+
+
 if __name__ == "__main__":
     import sys
 
@@ -359,4 +366,4 @@ if __name__ == "__main__":
 
     logger.info(f"Frame interval: {frame_interval}")
 
-    process_videos_from_folder(videos_folder, frame_interval)
+    asyncio.run(process_videos_from_folder_async(videos_folder, frame_interval))

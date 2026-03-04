@@ -1,6 +1,7 @@
 import asyncio
 import atexit
 import concurrent.futures
+import csv
 import io
 import json
 import os
@@ -8,6 +9,7 @@ import pathlib
 import shutil
 import tempfile
 import time
+from typing import Any
 
 import aiohttp
 import cv2
@@ -16,15 +18,20 @@ from loguru import logger
 from PIL import Image
 
 from lib.constants import (
+    BATCH_SIZE,
     CRON_INTERVAL,
     MAX_FILE_SIZE,
     MIN_CONFIDENCE,
     MIN_FILE_SIZE,
     ROWS_LIMIT,
 )
+from lib.db import (
+    fetch_unprocessed_scraped_images,
+    insert_embedded_images,
+    mark_scraped_images_processed,
+)
 from lib.face_analyzer import face_analyzer
 from lib.faiss_manager import images_faiss_manager
-from lib.supabase_client import supabase
 
 http_session = None
 
@@ -66,7 +73,7 @@ async def get_http_session():
     return http_session
 
 
-def extract_face_embeddings(image_data):
+def extract_face_embeddings(image_data: bytes) -> list[dict[str, Any]]:
     try:
         pil_image = Image.open(io.BytesIO(image_data))
 
@@ -104,7 +111,7 @@ def extract_face_embeddings(image_data):
         return []
 
 
-def extract_image_urls(record):
+def extract_image_urls(record: dict[str, Any]) -> list[str]:
     images = record.get("images", [])
 
     if not images:
@@ -116,6 +123,13 @@ def extract_image_urls(record):
         image_url = image_data.get("src")
 
         if image_url:
+            image_url = image_url.strip()
+
+            # Some pages incorrectly place srcset-like values in src.
+            if "," in image_url and " " in image_url:
+                first_candidate = image_url.split(",", 1)[0].strip()
+                image_url = first_candidate.split(" ", 1)[0]
+
             if image_url.startswith("/"):
                 image_url = f"https://{record['hostname']}{image_url}"
             elif not image_url.startswith("http"):
@@ -179,23 +193,68 @@ def collect_downloaded_images(output_folder):
     return downloaded_images
 
 
-async def download_images_with_img2dataset(image_urls):
+async def _download_single_image(url: str) -> tuple[str, bytes | None]:
+    async with semaphore:
+        try:
+            session = await get_http_session()
+            async with session.get(url) as response:
+                if response.status != 200:
+                    return url, None
+                image_data = await response.read()
+                if not (MIN_FILE_SIZE <= len(image_data) <= MAX_FILE_SIZE):
+                    return url, None
+                return url, image_data
+        except Exception:
+            return url, None
+
+
+async def download_images_direct(image_urls: list[str]) -> dict[str, bytes]:
+    if not image_urls:
+        return {}
+
+    results = await asyncio.gather(
+        *[_download_single_image(url) for url in image_urls], return_exceptions=True
+    )
+    downloaded_images: dict[str, bytes] = {}
+
+    for result in results:
+        if isinstance(result, BaseException):
+            continue
+        url, image_data = result
+        if image_data is not None:
+            downloaded_images[url] = image_data
+
+    logger.info(
+        f"Direct downloader fetched {len(downloaded_images)}/{len(image_urls)} images"
+    )
+    return downloaded_images
+
+
+async def download_images_with_img2dataset(image_urls: list[str]) -> dict[str, bytes]:
     if not image_urls:
         return {}
 
     tmp_dir = tempfile.mkdtemp(prefix="img2dataset_cron_")
 
     try:
-        url_list_path = pathlib.Path(tmp_dir) / "urls.txt"
+        url_list_path = pathlib.Path(tmp_dir) / "urls.csv"
         output_folder = pathlib.Path(tmp_dir) / "output"
 
         output_folder.mkdir(parents=True, exist_ok=True)
-        url_list_path.write_text("\n".join(image_urls), encoding="utf-8")
+        with url_list_path.open("w", encoding="utf-8", newline="") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["url"])
+            for url in image_urls:
+                writer.writerow([url])
+
+        img2dataset_env = os.environ.copy()
+        img2dataset_env.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
         process = await asyncio.create_subprocess_exec(
             "img2dataset",
             f"--url_list={url_list_path}",
-            "--input_format=txt",
+            "--input_format=csv",
+            "--url_col=url",
             f"--output_folder={output_folder}",
             "--output_format=files",
             f"--processes_count={IMG2DATASET_PROCESS_COUNT}",
@@ -205,14 +264,18 @@ async def download_images_with_img2dataset(image_urls):
             "--enable_wandb=False",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=img2dataset_env,
         )
         _, stderr_data = await process.communicate()
 
         if process.returncode != 0:
             stderr_text = stderr_data.decode("utf-8", errors="ignore")
-            raise RuntimeError(
-                f"img2dataset failed with code {process.returncode}: {stderr_text}"
+            logger.warning(
+                "img2dataset failed with code "
+                f"{process.returncode}; using direct downloader fallback. "
+                f"Error: {stderr_text}"
             )
+            return await download_images_direct(image_urls)
 
         downloaded_images = collect_downloaded_images(output_folder)
 
@@ -223,16 +286,22 @@ async def download_images_with_img2dataset(image_urls):
         return downloaded_images
 
     except FileNotFoundError:
-        raise RuntimeError(
-            "img2dataset binary not found. Install img2dataset to use cron downloader."
+        logger.warning(
+            "img2dataset binary not found; using direct downloader fallback."
         )
+        return await download_images_direct(image_urls)
     except Exception as e:
-        raise RuntimeError(f"img2dataset download failed: {e}") from e
+        logger.warning(
+            f"img2dataset download failed ({e}); using direct downloader fallback."
+        )
+        return await download_images_direct(image_urls)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def create_embedding_record(scraped_record, image_url, face_data):
+def create_embedding_record(
+    scraped_record: dict[str, Any], image_url: str, face_data: dict[str, Any]
+) -> dict[str, Any] | None:
     try:
         return {
             "scraped_images_id": scraped_record["id"],
@@ -252,7 +321,9 @@ def create_embedding_record(scraped_record, image_url, face_data):
         return None
 
 
-async def process_single_record(record, downloaded_images):
+async def process_single_record(
+    record: dict[str, Any], downloaded_images: dict[str, bytes]
+) -> list[dict[str, Any]]:
     try:
         image_urls = extract_image_urls(record)
 
@@ -283,8 +354,14 @@ async def process_single_record(record, downloaded_images):
         all_embeddings = []
 
         for url, result in zip(candidate_urls, image_results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 logger.warning(f"Error processing {url}: {result}")
+                continue
+
+            if not isinstance(result, list):
+                logger.warning(
+                    f"Unexpected result type for {url}: {type(result).__name__}"
+                )
                 continue
 
             if result:
@@ -303,17 +380,9 @@ async def process_single_record(record, downloaded_images):
         return []
 
 
-async def process_scraped_images():
+async def process_scraped_images() -> int:
     try:
-        supabase_response = (
-            supabase.table("scraped_images")
-            .select("*")
-            .eq("is_processed", False)
-            .limit(ROWS_LIMIT)
-            .execute()
-        )
-
-        scraped_records = supabase_response.data
+        scraped_records = await fetch_unprocessed_scraped_images(ROWS_LIMIT)
 
         if not scraped_records:
             logger.info("No unprocessed images found")
@@ -321,7 +390,7 @@ async def process_scraped_images():
 
         logger.info(f"Processing {len(scraped_records)} records...")
 
-        batch_size = 25
+        batch_size = BATCH_SIZE
 
         total_processed = 0
 
@@ -353,8 +422,14 @@ async def process_scraped_images():
             for record, result in zip(batch_records, batch_results):
                 total_processed += 1
 
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     logger.error(f"Error processing record {record['id']}: {result}")
+                    continue
+
+                if not isinstance(result, list):
+                    logger.error(
+                        f"Unexpected processed result type for record {record['id']}: {type(result).__name__}"
+                    )
                     continue
 
                 processed_record_ids.append(record["id"])
@@ -377,14 +452,14 @@ async def process_scraped_images():
                 chunk = all_embeddings[i : i + chunk_size]
 
                 try:
-                    supabase.table("embedded_images").insert(chunk).execute()
+                    inserted = await insert_embedded_images(chunk)
 
-                    logger.info(f"Inserted {len(chunk)} embeddings to database")
+                    logger.info(f"Inserted {inserted} embeddings to database")
 
                 except Exception as e:
                     logger.error(f"Error inserting chunk: {e}")
 
-            images_faiss_manager.rebuild_images_index_from_db()
+            await images_faiss_manager.rebuild_images_index_from_db()
 
         if processed_record_ids:
             chunk_size = 25
@@ -393,11 +468,9 @@ async def process_scraped_images():
                 id_chunk = processed_record_ids[i : i + chunk_size]
 
                 try:
-                    supabase.table("scraped_images").update({"is_processed": True}).in_(
-                        "id", id_chunk
-                    ).execute()
+                    updated = await mark_scraped_images_processed(id_chunk)
 
-                    logger.info(f"Marked {len(id_chunk)} records as processed")
+                    logger.info(f"Marked {updated} records as processed")
 
                 except Exception as e:
                     logger.error(f"Error updating chunk of IDs: {e}")
