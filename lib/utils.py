@@ -5,6 +5,7 @@ import aiohttp
 import cv2
 import numpy as np
 from fastapi import UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from loguru import logger
 from PIL import Image
@@ -154,13 +155,17 @@ def api_response(
     data: Any = None,
     status_code: int = 200,
 ) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content={
+    payload = jsonable_encoder(
+        {
             "success": success,
             "message": message,
             "data": data,
-        },
+        }
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content=payload,
     )
 
 

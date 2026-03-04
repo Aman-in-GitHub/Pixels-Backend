@@ -27,6 +27,7 @@ dependencies = [
 dev = ["pre-commit>=4.3.0"]
 
 [tool.scripts]
-dev = "bash -c 'uv run worker.py & fastapi dev --port 5000'"
-prod = "bash -c 'uv run worker.py & fastapi run --workers 6 --port 5000'"
+dev = "uv run worker.py & fastapi dev --port 5000"
+prod = "fastapi run --workers 4 --port 5000"
 worker = "uv run worker.py"
+video_embedder = "uv run -m lib.video_embedder"

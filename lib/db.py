@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from typing import Any, Iterable
+from uuid import UUID
 
 import asyncpg
 from dotenv import load_dotenv
@@ -14,6 +15,16 @@ _pool_lock = asyncio.Lock()
 
 _ALLOWED_EMBED_TABLES = {"embedded_images", "embedded_videos"}
 _udt_cache: dict[tuple[str, str], str | None] = {}
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default)
 
 
 def _get_database_url() -> str:
@@ -38,14 +49,14 @@ async def _init_connection(connection: asyncpg.Connection) -> None:
     await connection.set_type_codec(
         "json",
         schema="pg_catalog",
-        encoder=json.dumps,
+        encoder=_json_dumps,
         decoder=json.loads,
         format="text",
     )
     await connection.set_type_codec(
         "jsonb",
         schema="pg_catalog",
-        encoder=json.dumps,
+        encoder=_json_dumps,
         decoder=json.loads,
         format="text",
     )

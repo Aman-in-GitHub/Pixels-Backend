@@ -12,6 +12,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+from dotenv import load_dotenv
 from loguru import logger
 
 from lib.constants import (
@@ -39,6 +40,8 @@ from lib.utils import (
     unique_preserve_order,
 )
 
+load_dotenv()
+
 http_session = None
 
 semaphore = asyncio.Semaphore(DEFAULT_ASYNC_SEMAPHORE_LIMIT)
@@ -47,9 +50,9 @@ executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=DEFAULT_THREAD_POOL_WORKERS
 )
 
-IMG2DATASET_PROCESS_COUNT = max(1, min(16, os.cpu_count() or 4))
+IMG2DATASET_PROCESS_COUNT = max(1, (os.cpu_count() or 4) - 2)
 
-IMG2DATASET_THREAD_COUNT = 64
+IMG2DATASET_THREAD_COUNT = 256
 
 
 def cleanup_resources():
@@ -231,10 +234,8 @@ async def download_images_with_img2dataset(image_urls: list[str]) -> dict[str, b
 
         logger.info(f"Prepared img2dataset url list: {url_list_path}")
 
-        img2dataset_env = os.environ.copy()
-        img2dataset_env.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
-
         logger.info("Launching img2dataset process...")
+
         process = await asyncio.create_subprocess_exec(
             "img2dataset",
             f"--url_list={url_list_path}",
@@ -249,7 +250,6 @@ async def download_images_with_img2dataset(image_urls: list[str]) -> dict[str, b
             "--enable_wandb=False",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=img2dataset_env,
         )
         _, stderr_data = await process.communicate()
 
