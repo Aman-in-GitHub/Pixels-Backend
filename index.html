@@ -152,6 +152,11 @@
         cursor: pointer;
         margin-bottom: 10px;
       }
+
+      .endpoint-preview {
+        margin-top: 8px;
+        font-size: 12px;
+      }
     </style>
   </head>
 
@@ -166,12 +171,13 @@
     </div>
 
     <div class="section">
-      <label>API Endpoint:</label>
-      <input
-        type="text"
-        id="apiUrl"
-        value="https://pixels-backend.whatsablackbeatleanywayafuckingroach.qzz.io/get-matching-images"
-      />
+      <label>API Base URL:</label>
+      <input type="text" id="apiBaseUrl" value="" />
+      <label style="margin-top: 10px; display: block">Route Path:</label>
+      <input type="text" id="apiPath" value="/get-matching-images" readonly />
+      <p class="endpoint-preview">
+        Final URL: <code id="apiUrlPreview"></code>
+      </p>
     </div>
 
     <div class="section">
@@ -209,6 +215,10 @@
     <script>
       let selectedFile = null;
       let currentMode = "images";
+      const ENDPOINTS = {
+        images: "/get-matching-images",
+        videos: "/get-matching-videos",
+      };
 
       const uploadBox = document.getElementById("uploadBox");
       const fileInput = document.getElementById("fileInput");
@@ -217,9 +227,27 @@
       const previewSection = document.getElementById("previewSection");
       const selectedImage = document.getElementById("selectedImage");
       const resultsSection = document.getElementById("resultsSection");
-      const apiUrlInput = document.getElementById("apiUrl");
+      const apiBaseUrlInput = document.getElementById("apiBaseUrl");
+      const apiPathInput = document.getElementById("apiPath");
+      const apiUrlPreview = document.getElementById("apiUrlPreview");
       const imagesTab = document.getElementById("imagesTab");
       const videosTab = document.getElementById("videosTab");
+
+      apiBaseUrlInput.value = window.location.origin;
+
+      function joinUrl(baseUrl, path) {
+        const trimmedBase = baseUrl.replace(/\/+$/, "");
+        const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+        return `${trimmedBase}${normalizedPath}`;
+      }
+
+      function updateEndpointFields() {
+        const path = ENDPOINTS[currentMode];
+        apiPathInput.value = path;
+        apiUrlPreview.textContent = joinUrl(apiBaseUrlInput.value.trim(), path);
+      }
+
+      apiBaseUrlInput.addEventListener("input", updateEndpointFields);
 
       function switchTab(mode) {
         currentMode = mode;
@@ -227,15 +255,12 @@
         if (mode === "images") {
           imagesTab.classList.add("active");
           videosTab.classList.remove("active");
-          apiUrlInput.value =
-            "https://pixels-backend.whatsablackbeatleanywayafuckingroach.qzz.io/get-matching-images";
         } else {
           videosTab.classList.add("active");
           imagesTab.classList.remove("active");
-          apiUrlInput.value =
-            "https://pixels-backend.whatsablackbeatleanywayafuckingroach.qzz.io/get-matching-videos";
         }
 
+        updateEndpointFields();
         resetForm();
       }
 
@@ -291,11 +316,12 @@
       async function uploadAndSearch() {
         if (!selectedFile) return;
 
-        const apiUrl = apiUrlInput.value.trim();
-        if (!apiUrl) {
-          alert("Please enter an API endpoint URL");
+        const apiBaseUrl = apiBaseUrlInput.value.trim();
+        if (!apiBaseUrl) {
+          alert("Please enter an API base URL");
           return;
         }
+        const apiUrl = joinUrl(apiBaseUrl, ENDPOINTS[currentMode]);
 
         uploadBtn.disabled = true;
         resultsSection.classList.remove("hidden");
@@ -314,7 +340,12 @@
             body: formData,
           });
 
-          const data = await response.json();
+          let data;
+          try {
+            data = await response.json();
+          } catch (_) {
+            throw new Error(`Unexpected non-JSON response (HTTP ${response.status})`);
+          }
 
           document.getElementById("loadingIndicator").classList.add("hidden");
 
@@ -334,22 +365,22 @@
 
       function displayImageResults(data) {
         const statusInfo = document.getElementById("statusInfo");
-        const errorContainer = document.getElementById("errorContainer");
         const matchesContainer = document.getElementById("matchesContainer");
+        const payload = data.data || {};
 
         if (data.success) {
           statusInfo.innerHTML = `
                     <p>✓ Success: ${data.message}</p>
-                    <p>Total Matches: ${data.total_matches || 0}</p>
+                    <p>Total Matches: ${payload.total_matches || 0}</p>
                 `;
 
-          if (data.bounded_input_image) {
-            document.getElementById("boundedInputImage").src = data.bounded_input_image;
+          if (payload.bounded_input_image) {
+            document.getElementById("boundedInputImage").src = payload.bounded_input_image;
             document.getElementById("boundedInputContainer").classList.remove("hidden");
           }
 
-          if (data.matching_images && data.matching_images.length > 0) {
-            matchesContainer.innerHTML = data.matching_images
+          if (payload.matching_images && payload.matching_images.length > 0) {
+            matchesContainer.innerHTML = payload.matching_images
               .map((match, index) => createMatchCard(match, index))
               .join("");
           }
@@ -368,16 +399,16 @@
 
       function displayVideoResults(data) {
         const statusInfo = document.getElementById("statusInfo");
-        const errorContainer = document.getElementById("errorContainer");
         const matchesContainer = document.getElementById("matchesContainer");
+        const payload = data.data || {};
 
         if (data.success) {
           statusInfo.innerHTML = `
-                    <p>✓ Success: Found ${data.total_matches || 0} matching video(s)</p>
+                    <p>✓ Success: Found ${payload.total_matches || 0} matching video(s)</p>
                 `;
 
-          if (data.matching_videos && data.matching_videos.length > 0) {
-            matchesContainer.innerHTML = data.matching_videos
+          if (payload.matching_videos && payload.matching_videos.length > 0) {
+            matchesContainer.innerHTML = payload.matching_videos
               .map((video, index) => createVideoCard(video, index))
               .join("");
           }
@@ -501,6 +532,8 @@
         document.getElementById("errorContainer").innerHTML = "";
         document.getElementById("matchesContainer").innerHTML = "";
       }
+
+      updateEndpointFields();
     </script>
   </body>
 </html>
