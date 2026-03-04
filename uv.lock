@@ -2475,7 +2475,7 @@ wheels = [
 
 [[package]]
 name = "pixels-backend"
-version = "1.0.0"
+version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },

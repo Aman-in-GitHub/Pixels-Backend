@@ -1,6 +1,6 @@
 [project]
 name = "pixels-backend"
-version = "1.0.0"
+version = "0.0.0"
 requires-python = ">=3.10"
 dependencies = [
   "aiohttp>=3.12.15",
@@ -25,3 +25,8 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pre-commit>=4.3.0"]
+
+[tool.scripts]
+dev = "bash -c 'uv run worker.py & fastapi dev --port 5000'"
+prod = "bash -c 'uv run worker.py & fastapi run --workers 6 --port 5000'"
+worker = "uv run worker.py"
