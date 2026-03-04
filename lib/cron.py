@@ -135,7 +135,6 @@ def create_embedding_record(scraped_record, image_url, face_data):
             "title": scraped_record.get("title"),
             "favicon": scraped_record.get("favicon"),
             "images": scraped_record.get("images", []),
-            "screenshot": scraped_record.get("screenshot", ""),
             "embedding": face_data["embedding"],
             "bbox": face_data["bbox"],
             "embedded_image": image_url,

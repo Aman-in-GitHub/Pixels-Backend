@@ -229,7 +229,6 @@ def create_video_embedding_record(
             "domain": scraped_record["domain"],
             "title": scraped_record.get("title"),
             "favicon": scraped_record.get("favicon"),
-            "screenshot": scraped_record.get("screenshot", ""),
             "embedding": face_data["embedding"],
             "bbox": face_data["bbox"],
             "embedded_video": video_path,
@@ -320,7 +319,6 @@ def process_videos_from_folder(videos_folder_path, frame_interval=30):
             "domain": "pages.dev",
             "title": "Angie Portfolio",
             "favicon": "https://angiedevfolio.pages.dev/favicon.svg",
-            "screenshot": "http://127.0.0.1:54321/storage/v1/object/public/pixels-screenshots/685c1e7c2fd37d6c7d5b41505e0f29104ac03ed5f8bc20099a663708eaf097bb.png",
         }
 
         embeddings = create_embedding_from_videos(
