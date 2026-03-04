@@ -87,11 +87,11 @@ async def download_image(url, session):
                     return None
 
                 is_valid_image = (
-                    image_data[:2] == b"\xff\xd8"  # JPEG
-                    or image_data[:8] == b"\x89PNG\r\n\x1a\n"  # PNG
-                    or image_data[:6] in (b"GIF87a", b"GIF89a")  # GIF
+                    image_data[:2] == b"\xff\xd8"
+                    or image_data[:8] == b"\x89PNG\r\n\x1a\n"
+                    or image_data[:6] in (b"GIF87a", b"GIF89a")
                     or image_data[:4] == b"RIFF"
-                    and image_data[8:12] == b"WEBP"  # WEBP
+                    and image_data[8:12] == b"WEBP"
                 )
 
                 if not is_valid_image:
@@ -227,7 +227,7 @@ async def scrape_page_images(page_url, session):
 
 
 async def scrape_all_website_images(page_urls, session):
-    all_image_urls = set()  # Use set to avoid duplicates
+    all_image_urls = set()
 
     logger.info(f"Scraping images from {len(page_urls)} pages")
 

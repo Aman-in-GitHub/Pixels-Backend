@@ -2,7 +2,6 @@ import asyncio
 import atexit
 import concurrent.futures
 import csv
-import io
 import json
 import os
 import pathlib
@@ -15,7 +14,6 @@ import aiohttp
 import cv2
 import numpy as np
 from loguru import logger
-from PIL import Image
 
 from lib.constants import (
     BATCH_SIZE,
@@ -75,12 +73,12 @@ async def get_http_session():
 
 def extract_face_embeddings(image_data: bytes) -> list[dict[str, Any]]:
     try:
-        pil_image = Image.open(io.BytesIO(image_data))
+        arr = np.frombuffer(image_data, dtype=np.uint8)
 
-        if pil_image.mode != "RGB":
-            pil_image = pil_image.convert("RGB")
+        opencv_image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
-        opencv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        if opencv_image is None:
+            return []
 
         faces = face_analyzer.get(opencv_image)
 
@@ -125,7 +123,6 @@ def extract_image_urls(record: dict[str, Any]) -> list[str]:
         if image_url:
             image_url = image_url.strip()
 
-            # Some pages incorrectly place srcset-like values in src.
             if "," in image_url and " " in image_url:
                 first_candidate = image_url.split(",", 1)[0].strip()
                 image_url = first_candidate.split(" ", 1)[0]
@@ -321,8 +318,58 @@ def create_embedding_record(
         return None
 
 
+async def build_face_results_cache(
+    image_urls: list[str], downloaded_images: dict[str, bytes]
+) -> dict[str, list[dict[str, Any]]]:
+    if not image_urls or not downloaded_images:
+        return {}
+
+    loop = asyncio.get_running_loop()
+
+    unique_urls = [
+        url for url in dict.fromkeys(image_urls) if downloaded_images.get(url)
+    ]
+    extraction_tasks = [
+        loop.run_in_executor(executor, extract_face_embeddings, downloaded_images[url])
+        for url in unique_urls
+    ]
+
+    if not extraction_tasks:
+        return {}
+
+    image_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
+
+    face_results_cache: dict[str, list[dict[str, Any]]] = {}
+
+    for url, result in zip(unique_urls, image_results):
+        if isinstance(result, BaseException):
+            logger.warning(f"Error processing {url}: {result}")
+            face_results_cache[url] = []
+            continue
+
+        if not isinstance(result, list):
+            logger.warning(f"Unexpected result type for {url}: {type(result).__name__}")
+            face_results_cache[url] = []
+            continue
+
+        if result:
+            logger.debug(f"Found {len(result)} faces in {url}")
+
+        face_results_cache[url] = result
+
+    urls_with_faces = sum(1 for faces in face_results_cache.values() if faces)
+    total_faces = sum(len(faces) for faces in face_results_cache.values())
+    logger.info(
+        "Face extraction summary: "
+        f"{urls_with_faces}/{len(face_results_cache)} urls with faces, "
+        f"{total_faces} total faces"
+    )
+
+    return face_results_cache
+
+
 async def process_single_record(
-    record: dict[str, Any], downloaded_images: dict[str, bytes]
+    record: dict[str, Any], face_results_cache: dict[str, list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
     try:
         image_urls = extract_image_urls(record)
@@ -330,48 +377,15 @@ async def process_single_record(
         if not image_urls:
             return []
 
-        loop = asyncio.get_running_loop()
-
-        candidate_urls = []
-        extraction_tasks = []
-
-        for url in image_urls:
-            image_data = downloaded_images.get(url)
-
-            if not image_data:
-                continue
-
-            candidate_urls.append(url)
-            extraction_tasks.append(
-                loop.run_in_executor(executor, extract_face_embeddings, image_data)
-            )
-
-        if not extraction_tasks:
-            return []
-
-        image_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
-
         all_embeddings = []
 
-        for url, result in zip(candidate_urls, image_results):
-            if isinstance(result, BaseException):
-                logger.warning(f"Error processing {url}: {result}")
-                continue
+        for url in dict.fromkeys(image_urls):
+            face_results = face_results_cache.get(url, [])
+            for face_data in face_results:
+                embedding_record = create_embedding_record(record, url, face_data)
 
-            if not isinstance(result, list):
-                logger.warning(
-                    f"Unexpected result type for {url}: {type(result).__name__}"
-                )
-                continue
-
-            if result:
-                logger.info(f"Found {len(result)} faces in {url}")
-
-                for face_data in result:
-                    embedding_record = create_embedding_record(record, url, face_data)
-
-                    if embedding_record:
-                        all_embeddings.append(embedding_record)
+                if embedding_record:
+                    all_embeddings.append(embedding_record)
 
         return all_embeddings
 
@@ -400,6 +414,7 @@ async def process_scraped_images() -> int:
 
         for i in range(0, len(scraped_records), batch_size):
             batch_records = scraped_records[i : i + batch_size]
+            batch_number = (i // batch_size) + 1
 
             batch_urls = []
             for record in batch_records:
@@ -410,14 +425,19 @@ async def process_scraped_images() -> int:
             downloaded_images = await download_images_with_img2dataset(
                 unique_batch_urls
             )
+            face_results_cache = await build_face_results_cache(
+                unique_batch_urls, downloaded_images
+            )
 
             batch_results = await asyncio.gather(
                 *[
-                    process_single_record(record, downloaded_images)
+                    process_single_record(record, face_results_cache)
                     for record in batch_records
                 ],
                 return_exceptions=True,
             )
+
+            batch_embeddings_count = 0
 
             for record, result in zip(batch_records, batch_results):
                 total_processed += 1
@@ -436,14 +456,23 @@ async def process_scraped_images() -> int:
 
                 if result:
                     all_embeddings.extend(result)
+                    batch_embeddings_count += len(result)
 
-                    logger.info(
+                    logger.debug(
                         f"Processed record {record['id']} | {len(result)} embeddings | ({total_processed}/{len(scraped_records)})"
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         f"Processed record {record['id']} | 0 embeddings | ({total_processed}/{len(scraped_records)})"
                     )
+
+            logger.info(
+                "Batch summary: "
+                f"batch={batch_number}, records={len(batch_records)}, "
+                f"embeddings={batch_embeddings_count}, "
+                f"downloaded_images={len(downloaded_images)}, "
+                f"processed_records_total={total_processed}/{len(scraped_records)}"
+            )
 
         if all_embeddings:
             chunk_size = 25
@@ -533,9 +562,9 @@ async def process_scraped_images_for_embeddings():
                         logger.info("No more records to process, ending cycle")
                         break
 
-                    logger.info("Waiting 5 seconds before next batch...")
+                    logger.info("Waiting 3 seconds before next batch...")
 
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(3)
 
                 cycle_end_time = time.perf_counter()
 
@@ -546,6 +575,7 @@ async def process_scraped_images_for_embeddings():
                 )
 
             logger.info(f"Waiting {CRON_INTERVAL} seconds before next cycle...")
+
             await asyncio.sleep(CRON_INTERVAL)
 
         except asyncio.CancelledError:
