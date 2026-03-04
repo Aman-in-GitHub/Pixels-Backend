@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, UploadFile, status
 from loguru import logger
 
 from lib.constants import (
@@ -9,10 +9,12 @@ from lib.constants import (
 from lib.face_analyzer import face_analyzer
 from lib.faiss_manager import videos_faiss_manager
 from lib.utils import (
+    error_response,
     extract_single_face_from_image_data,
     is_allowed_image_upload,
     is_valid_file_size,
     remove_keys,
+    success_response,
 )
 
 router = APIRouter()
@@ -21,13 +23,17 @@ router = APIRouter()
 @router.post("/get-matching-videos")
 async def get_matching_videos(file: UploadFile = File(...)):
     if not is_allowed_image_upload(file):
-        return {"success": False, "message": "Invalid file"}
+        return error_response(
+            "Invalid file type", status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+        )
 
     try:
         image_data = await file.read()
 
         if not is_valid_file_size(image_data):
-            return {"success": False, "message": "Invalid file size"}
+            return error_response(
+                "Invalid file size", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+            )
 
         face, _, error_msg = extract_single_face_from_image_data(
             image_data, face_analyzer
@@ -35,7 +41,10 @@ async def get_matching_videos(file: UploadFile = File(...)):
         embedding = face.embedding.tolist() if face else None
 
         if not embedding:
-            return {"success": False, "message": error_msg}
+            return error_response(
+                error_msg or "Face processing failed",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
 
         matches = videos_faiss_manager.search_matching_images(
             embedding, k=MAX_MATCHING_RESULTS, threshold=MATCHING_THRESHOLD
@@ -44,7 +53,7 @@ async def get_matching_videos(file: UploadFile = File(...)):
         video_matches = [match for match in matches if "embedded_video" in match]
 
         if not video_matches:
-            return {"success": False, "message": "No matching videos found"}
+            return error_response("No matching videos found", status.HTTP_404_NOT_FOUND)
 
         video_groups = {}
 
@@ -69,13 +78,18 @@ async def get_matching_videos(file: UploadFile = File(...)):
 
         logger.info(f"Found {len(cleaned_matches)} matching videos")
 
-        return {
-            "success": True,
-            "matching_videos": cleaned_matches,
-            "total_matches": len(cleaned_matches),
-            "message": f"Found {len(cleaned_matches)} matching videos",
-        }
+        return success_response(
+            message=f"Found {len(cleaned_matches)} matching videos",
+            data={
+                "matching_videos": cleaned_matches,
+                "total_matches": len(cleaned_matches),
+            },
+            status_code=status.HTTP_200_OK,
+        )
 
     except Exception as e:
         logger.error(f"Error getting matching videos: {e}")
-        return {"success": False, "message": "Failed to get matching videos"}
+        return error_response(
+            "Failed to get matching videos",
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )

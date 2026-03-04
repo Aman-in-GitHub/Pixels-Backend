@@ -5,6 +5,7 @@ import aiohttp
 import cv2
 import numpy as np
 from fastapi import UploadFile
+from fastapi.responses import JSONResponse
 from loguru import logger
 from PIL import Image
 
@@ -144,4 +145,46 @@ def is_valid_image_magic_bytes(image_data: bytes) -> bool:
         or image_data[:8] == b"\x89PNG\r\n\x1a\n"
         or image_data[:6] in (b"GIF87a", b"GIF89a")
         or (image_data[:4] == b"RIFF" and image_data[8:12] == b"WEBP")
+    )
+
+
+def api_response(
+    success: bool,
+    message: str,
+    data: Any = None,
+    status_code: int = 200,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": success,
+            "message": message,
+            "data": data,
+        },
+    )
+
+
+def success_response(
+    message: str,
+    data: Any = None,
+    status_code: int = 200,
+) -> JSONResponse:
+    return api_response(
+        success=True,
+        message=message,
+        data=data,
+        status_code=status_code,
+    )
+
+
+def error_response(
+    message: str,
+    status_code: int = 400,
+    data: Any = None,
+) -> JSONResponse:
+    return api_response(
+        success=False,
+        message=message,
+        data=data,
+        status_code=status_code,
     )

@@ -2,18 +2,25 @@ import re
 
 import requests
 from bs4 import BeautifulSoup
-from fastapi import APIRouter
+from fastapi import APIRouter, status
 from loguru import logger
+
+from lib.constants import DEFAULT_HTTP_TIMEOUT_SECONDS
+from lib.utils import error_response, success_response
 
 router = APIRouter()
 
 
 @router.get("/get-whois")
 def get_whois(domain: str):
+    if not domain or not domain.strip():
+        return error_response("Domain is required", status.HTTP_400_BAD_REQUEST)
+
     try:
         url = f"https://www.whois.com/whois/{domain}"
 
-        response = requests.get(url)
+        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS)
+        response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
 
@@ -74,13 +81,16 @@ def get_whois(domain: str):
 
         logger.info(f"WHOIS data fetched successfully for {domain}")
 
-        return {
-            "success": True,
-            "emails": emails,
-            "countries": countries,
-            "whois": data,
-        }
+        return success_response(
+            "WHOIS data fetched successfully",
+            data={
+                "emails": emails,
+                "countries": countries,
+                "whois": data,
+            },
+            status_code=status.HTTP_200_OK,
+        )
 
     except Exception as e:
         logger.error(f"Error fetching WHOIS data for {domain}: {e}")
-        return {"success": False, "message": "Failed to process whois"}
+        return error_response("Failed to process whois", status.HTTP_502_BAD_GATEWAY)

@@ -1,7 +1,7 @@
 import insightface
 
 face_analyzer = insightface.app.FaceAnalysis(
-    name="buffalo_m",
+    name="buffalo_l",
     providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
     allowed_modules=["detection", "recognition"],
 )

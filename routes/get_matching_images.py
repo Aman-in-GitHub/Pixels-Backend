@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, UploadFile, status
 from loguru import logger
 from NudeNetv2 import NudeClassifier
 from PIL import Image
@@ -23,10 +23,12 @@ from lib.face_analyzer import face_analyzer
 from lib.faiss_manager import images_faiss_manager
 from lib.utils import (
     create_http_session,
+    error_response,
     extract_single_face_from_image_data,
     is_allowed_image_upload,
     is_valid_file_size,
     remove_keys,
+    success_response,
 )
 
 router = APIRouter()
@@ -105,7 +107,10 @@ async def download_and_process_image(url, bbox):
             session = await get_http_session()
 
             async with session.get(url) as response:
-                if response.status != 200 or response.content_length > MAX_FILE_SIZE:
+                content_length = response.content_length
+                if response.status != 200 or (
+                    content_length is not None and content_length > MAX_FILE_SIZE
+                ):
                     return None
 
                 image_data = await response.read()
@@ -180,13 +185,17 @@ def process_input_image(image_data):
 @router.post("/get-matching-images")
 async def get_matching_images(file: UploadFile = File(...)):
     if not is_allowed_image_upload(file):
-        return {"success": False, "message": "Invalid file"}
+        return error_response(
+            "Invalid file type", status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+        )
 
     try:
         image_data = await file.read()
 
         if not is_valid_file_size(image_data):
-            return {"success": False, "message": "Invalid file size"}
+            return error_response(
+                "Invalid file size", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+            )
 
         loop = asyncio.get_running_loop()
 
@@ -195,7 +204,10 @@ async def get_matching_images(file: UploadFile = File(...)):
         )
 
         if not input_result:
-            return {"success": False, "message": error_msg}
+            return error_response(
+                error_msg or "Face processing failed",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
 
         embedding, bounded_input = input_result
 
@@ -206,7 +218,7 @@ async def get_matching_images(file: UploadFile = File(...)):
         image_matches = [match for match in matches if "embedded_image" in match]
 
         if not image_matches:
-            return {"success": False, "message": "No matching images found"}
+            return error_response("No matching images found", status.HTTP_404_NOT_FOUND)
 
         processed_matches = await asyncio.gather(
             *[process_single_match(match) for match in image_matches],
@@ -221,14 +233,19 @@ async def get_matching_images(file: UploadFile = File(...)):
 
         logger.info(f"Found {len(successful_matches)} matching images")
 
-        return {
-            "success": True,
-            "bounded_input_image": bounded_input,
-            "matching_images": successful_matches,
-            "total_matches": len(successful_matches),
-            "message": f"Found {len(successful_matches)} matching images",
-        }
+        return success_response(
+            message=f"Found {len(successful_matches)} matching images",
+            data={
+                "bounded_input_image": bounded_input,
+                "matching_images": successful_matches,
+                "total_matches": len(successful_matches),
+            },
+            status_code=status.HTTP_200_OK,
+        )
 
     except Exception as e:
         logger.error(f"Error getting matching photos: {e}")
-        return {"success": False, "message": "Failed to get matching photos"}
+        return error_response(
+            "Failed to get matching photos",
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )

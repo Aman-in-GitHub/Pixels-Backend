@@ -211,6 +211,11 @@ async def download_images_with_img2dataset(image_urls: list[str]) -> dict[str, b
     if not image_urls:
         return {}
 
+    logger.info(
+        f"Starting image download with img2dataset for {len(image_urls)} urls..."
+    )
+    download_start_time = time.perf_counter()
+
     tmp_dir = tempfile.mkdtemp(prefix="img2dataset_cron_")
 
     try:
@@ -224,9 +229,12 @@ async def download_images_with_img2dataset(image_urls: list[str]) -> dict[str, b
             for url in image_urls:
                 writer.writerow([url])
 
+        logger.info(f"Prepared img2dataset url list: {url_list_path}")
+
         img2dataset_env = os.environ.copy()
         img2dataset_env.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
+        logger.info("Launching img2dataset process...")
         process = await asyncio.create_subprocess_exec(
             "img2dataset",
             f"--url_list={url_list_path}",
@@ -255,9 +263,10 @@ async def download_images_with_img2dataset(image_urls: list[str]) -> dict[str, b
             return await download_images_direct(image_urls)
 
         downloaded_images = collect_downloaded_images(output_folder)
+        elapsed = time.perf_counter() - download_start_time
 
         logger.info(
-            f"img2dataset downloaded {len(downloaded_images)}/{len(image_urls)} images"
+            f"img2dataset downloaded {len(downloaded_images)}/{len(image_urls)} images in {elapsed:.2f}s"
         )
 
         return downloaded_images
@@ -317,6 +326,8 @@ async def build_face_results_cache(
     if not extraction_tasks:
         return {}
 
+    logger.info(f"Starting face extraction for {len(unique_urls)} downloaded images...")
+    extraction_start_time = time.perf_counter()
     image_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
 
     face_results_cache: dict[str, list[dict[str, Any]]] = {}
@@ -339,10 +350,11 @@ async def build_face_results_cache(
 
     urls_with_faces = sum(1 for faces in face_results_cache.values() if faces)
     total_faces = sum(len(faces) for faces in face_results_cache.values())
+    extraction_elapsed = time.perf_counter() - extraction_start_time
     logger.info(
         "Face extraction summary: "
         f"{urls_with_faces}/{len(face_results_cache)} urls with faces, "
-        f"{total_faces} total faces"
+        f"{total_faces} total faces, took {extraction_elapsed:.2f}s"
     )
 
     return face_results_cache
@@ -402,19 +414,37 @@ async def process_scraped_images() -> int:
 
             unique_batch_urls = unique_preserve_order(batch_urls)
 
+            logger.info(
+                f"Batch {batch_number}: records={len(batch_records)}, "
+                f"image_urls={len(batch_urls)}, unique_image_urls={len(unique_batch_urls)}"
+            )
+
+            logger.info(f"Batch {batch_number}: starting image download...")
+            batch_download_start = time.perf_counter()
             downloaded_images = await download_images_with_img2dataset(
                 unique_batch_urls
             )
+            batch_download_elapsed = time.perf_counter() - batch_download_start
+            logger.info(
+                f"Batch {batch_number}: image download complete in {batch_download_elapsed:.2f}s"
+            )
+
+            logger.info(f"Batch {batch_number}: starting face extraction...")
             face_results_cache = await build_face_results_cache(
                 unique_batch_urls, downloaded_images
             )
 
+            logger.info(f"Batch {batch_number}: building embedding records...")
+            batch_record_processing_start = time.perf_counter()
             batch_results = await asyncio.gather(
                 *[
                     process_single_record(record, face_results_cache)
                     for record in batch_records
                 ],
                 return_exceptions=True,
+            )
+            batch_record_processing_elapsed = (
+                time.perf_counter() - batch_record_processing_start
             )
 
             batch_embeddings_count = 0
@@ -451,11 +481,16 @@ async def process_scraped_images() -> int:
                 f"batch={batch_number}, records={len(batch_records)}, "
                 f"embeddings={batch_embeddings_count}, "
                 f"downloaded_images={len(downloaded_images)}, "
+                f"record_processing={batch_record_processing_elapsed:.2f}s, "
                 f"processed_records_total={total_processed}/{len(scraped_records)}"
             )
 
         if all_embeddings:
             chunk_size = DB_WRITE_CHUNK_SIZE
+            logger.info(
+                f"Starting database insert for {len(all_embeddings)} embeddings "
+                f"with chunk_size={chunk_size}"
+            )
 
             for i in range(0, len(all_embeddings), chunk_size):
                 chunk = all_embeddings[i : i + chunk_size]
@@ -468,10 +503,15 @@ async def process_scraped_images() -> int:
                 except Exception as e:
                     logger.error(f"Error inserting chunk: {e}")
 
+            logger.info("Rebuilding images FAISS index after DB insert...")
             await images_faiss_manager.rebuild_images_index_from_db()
 
         if processed_record_ids:
             chunk_size = DB_WRITE_CHUNK_SIZE
+            logger.info(
+                f"Marking {len(processed_record_ids)} source records as processed "
+                f"with chunk_size={chunk_size}"
+            )
 
             for i in range(0, len(processed_record_ids), chunk_size):
                 id_chunk = processed_record_ids[i : i + chunk_size]

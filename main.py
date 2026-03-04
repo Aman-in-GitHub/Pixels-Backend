@@ -1,4 +1,3 @@
-import asyncio
 import sys
 from contextlib import asynccontextmanager
 
@@ -15,9 +14,9 @@ from lib.constants import (
     STATIC_VIDEOS_DIR,
     STATIC_VIDEOS_ROUTE,
 )
-from lib.cron import process_scraped_images_for_embeddings
 from lib.db import close_db_pool, init_db_pool
 from lib.faiss_manager import images_faiss_manager, videos_faiss_manager
+from lib.utils import success_response
 from routes.get_matching_images import router as get_matching_images_router
 from routes.get_matching_videos import router as get_matching_videos_router
 from routes.get_whois import router as get_whois_router
@@ -28,13 +27,9 @@ logger.remove()
 
 logger.add(sys.stdout, level=APP_LOG_LEVEL)
 
-background_task = None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global background_task
-
     try:
         await init_db_pool()
 
@@ -50,21 +45,10 @@ async def lifespan(app: FastAPI):
         if videos_stats["total_embeddings"] == 0:
             await videos_faiss_manager.rebuild_video_index_from_db()
 
-        background_task = asyncio.create_task(process_scraped_images_for_embeddings())
-
     except Exception as e:
         logger.error(f"Error during startup: {e}")
 
     yield
-
-    if background_task:
-        background_task.cancel()
-
-        try:
-            await background_task
-
-        except asyncio.CancelledError:
-            pass
 
     await close_db_pool()
 
@@ -91,7 +75,7 @@ app.mount(STATIC_VIDEOS_ROUTE, StaticFiles(directory=STATIC_VIDEOS_DIR), name="v
 
 @app.get("/")
 async def root():
-    return {"success": True, "message": ROOT_HELLO_MESSAGE}
+    return success_response(ROOT_HELLO_MESSAGE, data={"service": "pixels-backend"})
 
 
 @app.get("/favicon.ico")

@@ -3,7 +3,7 @@ from collections import deque
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from fastapi import APIRouter
+from fastapi import APIRouter, status
 from loguru import logger
 from pydantic import BaseModel
 
@@ -25,7 +25,9 @@ from lib.cron import (
 from lib.utils import (
     compute_cosine_similarity,
     content_type_matches_any,
+    error_response,
     is_valid_image_magic_bytes,
+    success_response,
 )
 
 router = APIRouter()
@@ -302,10 +304,10 @@ async def recheck_image(request: RecheckImageRequest):
         original_image_data = await download_image(request.image_url, session)
 
         if not original_image_data:
-            return {
-                "success": False,
-                "message": "Failed to download original image",
-            }
+            return error_response(
+                "Failed to download original image",
+                status.HTTP_502_BAD_GATEWAY,
+            )
 
         loop = asyncio.get_running_loop()
 
@@ -314,10 +316,10 @@ async def recheck_image(request: RecheckImageRequest):
         )
 
         if error or not target_embedding:
-            return {
-                "success": False,
-                "message": f"Failed to extract face from original image: {error}",
-            }
+            return error_response(
+                f"Failed to extract face from original image: {error}",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
 
         logger.info("Successfully extracted face embedding from original image")
 
@@ -333,14 +335,16 @@ async def recheck_image(request: RecheckImageRequest):
         website_image_urls = await scrape_all_website_images(discovered_pages, session)
 
         if not website_image_urls:
-            return {
-                "success": True,
-                "still_exists": False,
-                "message": "No images found on website",
-                "pages_crawled": len(discovered_pages),
-                "total_images_checked": 0,
-                "matches_found": [],
-            }
+            return success_response(
+                "No images found on website",
+                data={
+                    "still_exists": False,
+                    "pages_crawled": len(discovered_pages),
+                    "total_images_checked": 0,
+                    "matches_found": [],
+                },
+                status_code=status.HTTP_200_OK,
+            )
 
         logger.info(
             f"Found {len(website_image_urls)} unique images to check across {len(discovered_pages)} pages"
@@ -371,19 +375,24 @@ async def recheck_image(request: RecheckImageRequest):
             f"across {len(discovered_pages)} pages (errors: {len(errors)}, no faces/invalid: {len(none_results)})"
         )
 
-        return {
-            "success": True,
-            "matches_found": matches,
-            "message": (
+        return success_response(
+            message=(
                 f"Found {len(matches)} matching image(s) across {len(discovered_pages)} pages"
                 if still_exists
                 else "No matching images found - image has been removed"
             ),
-        }
+            data={
+                "still_exists": still_exists,
+                "pages_crawled": len(discovered_pages),
+                "total_images_checked": len(website_image_urls),
+                "matches_found": matches,
+            },
+            status_code=status.HTTP_200_OK,
+        )
 
     except Exception as e:
         logger.error(f"Error in recheck_image: {e}")
-        return {
-            "success": False,
-            "message": f"Failed to recheck image: {str(e)}",
-        }
+        return error_response(
+            "Failed to recheck image",
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )

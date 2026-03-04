@@ -1,4 +1,5 @@
 import pickle
+import time
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -23,10 +24,14 @@ class FAISSManager:
         self.index_path = Path(index_path)
 
         self.metadata_path = Path(metadata_path)
+        self.version_path = self.metadata_path.with_suffix(
+            f"{self.metadata_path.suffix}.version"
+        )
 
         self.index: Any | None = None
 
         self.metadata: dict[int, RecordData] = {}
+        self.loaded_version: str | None = self._read_index_version()
 
         self.embedding_dimension = FAISS_EMBEDDING_DIMENSION
 
@@ -68,6 +73,31 @@ class FAISSManager:
         self.index = faiss.IndexFlatIP(self.embedding_dimension)
 
         self.metadata = {}
+
+    def _read_index_version(self) -> str | None:
+        try:
+            if not self.version_path.exists():
+                return None
+            version = self.version_path.read_text(encoding="utf-8").strip()
+            return version or None
+        except Exception:
+            return None
+
+    def _write_index_version(self) -> None:
+        version = str(time.time_ns())
+        self.version_path.write_text(version, encoding="utf-8")
+        self.loaded_version = version
+
+    def _reload_if_index_updated(self) -> None:
+        current_version = self._read_index_version()
+        if not current_version or current_version == self.loaded_version:
+            return
+
+        logger.info(
+            f"Detected updated FAISS files at {self.index_path}, reloading index..."
+        )
+        self._load_or_create_index()
+        self.loaded_version = current_version
 
     def _normalize_embeddings(self, embeddings: list[Any]) -> np.ndarray:
         embeddings_array = np.array(embeddings, dtype=np.float32)
@@ -141,6 +171,8 @@ class FAISSManager:
         k: int = 100,
         threshold: float = MATCHING_THRESHOLD,
     ) -> list[RecordData]:
+        self._reload_if_index_updated()
+
         index = self.index
         if index is None or index.ntotal == 0:
             logger.warning("FAISS index is empty")
@@ -174,6 +206,8 @@ class FAISSManager:
 
             with open(self.metadata_path, "wb") as f:
                 pickle.dump(self.metadata, f)
+
+            self._write_index_version()
 
         except Exception as e:
             logger.error(f"Error saving index: {e}")
@@ -289,6 +323,7 @@ class FAISSManager:
             logger.error(f"Error rebuilding video index: {e}")
 
     def get_stats(self) -> dict[str, Any]:
+        self._reload_if_index_updated()
         index = self.index
         return {
             "total_embeddings": index.ntotal if index is not None else 0,
