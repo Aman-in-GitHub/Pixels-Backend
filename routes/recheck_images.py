@@ -2,18 +2,30 @@ import asyncio
 from collections import deque
 from urllib.parse import urljoin, urlparse
 
-import numpy as np
 from bs4 import BeautifulSoup
 from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel
 
-from lib.constants import MATCHING_THRESHOLD
+from lib.constants import (
+    DEFAULT_HTTP_TIMEOUT_SECONDS,
+    MATCHING_THRESHOLD,
+    RECHECK_DEFAULT_MAX_DEPTH,
+    RECHECK_DEFAULT_MAX_PAGES,
+    REMOTE_ALLOWED_IMAGE_TYPES,
+    REMOTE_MIN_IMAGE_MAGIC_BYTES,
+    SCRAPE_SKIP_IMAGE_EXTENSIONS,
+)
 from lib.cron import (
     executor,
     extract_face_embeddings,
     get_http_session,
     semaphore,
+)
+from lib.utils import (
+    compute_cosine_similarity,
+    content_type_matches_any,
+    is_valid_image_magic_bytes,
 )
 
 router = APIRouter()
@@ -23,8 +35,8 @@ class RecheckImageRequest(BaseModel):
     id: str
     image_url: str
     website_url: str
-    max_pages: int = 50
-    max_depth: int = 3
+    max_pages: int = RECHECK_DEFAULT_MAX_PAGES
+    max_depth: int = RECHECK_DEFAULT_MAX_DEPTH
 
 
 def extract_single_face_embedding(image_data):
@@ -43,12 +55,9 @@ def extract_single_face_embedding(image_data):
 
 def compare_embeddings(embedding1, embedding2, threshold=MATCHING_THRESHOLD):
     try:
-        vec1 = np.array(embedding1)
-        vec2 = np.array(embedding2)
+        similarity = compute_cosine_similarity(embedding1, embedding2)
 
-        similarity = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-
-        return float(similarity) >= threshold, float(similarity)
+        return similarity >= threshold, similarity
 
     except Exception as e:
         logger.error(f"Error comparing embeddings: {e}")
@@ -58,20 +67,15 @@ def compare_embeddings(embedding1, embedding2, threshold=MATCHING_THRESHOLD):
 async def download_image(url, session):
     async with semaphore:
         try:
-            async with session.get(url, timeout=10) as response:
+            async with session.get(
+                url, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS
+            ) as response:
                 if response.status != 200:
                     return None
 
                 content_type = response.headers.get("Content-Type", "")
-                if not any(
-                    img_type in content_type.lower()
-                    for img_type in [
-                        "image/jpeg",
-                        "image/jpg",
-                        "image/png",
-                        "image/webp",
-                        "image/gif",
-                    ]
+                if not content_type_matches_any(
+                    content_type, REMOTE_ALLOWED_IMAGE_TYPES
                 ):
                     logger.warning(
                         f"Skipping {url}: invalid content type {content_type}"
@@ -80,21 +84,13 @@ async def download_image(url, session):
 
                 image_data = await response.read()
 
-                if len(image_data) < 12:
+                if len(image_data) < REMOTE_MIN_IMAGE_MAGIC_BYTES:
                     logger.warning(
                         f"Skipping {url}: file too small ({len(image_data)} bytes)"
                     )
                     return None
 
-                is_valid_image = (
-                    image_data[:2] == b"\xff\xd8"
-                    or image_data[:8] == b"\x89PNG\r\n\x1a\n"
-                    or image_data[:6] in (b"GIF87a", b"GIF89a")
-                    or image_data[:4] == b"RIFF"
-                    and image_data[8:12] == b"WEBP"
-                )
-
-                if not is_valid_image:
+                if not is_valid_image_magic_bytes(image_data):
                     logger.warning(
                         f"Skipping {url}: not a valid image file (magic bytes check failed)"
                     )
@@ -128,7 +124,12 @@ def is_same_domain(url, base_url):
     return parsed_url.netloc == parsed_base.netloc
 
 
-async def crawl_website_pages(base_url, session, max_pages=50, max_depth=3):
+async def crawl_website_pages(
+    base_url,
+    session,
+    max_pages=RECHECK_DEFAULT_MAX_PAGES,
+    max_depth=RECHECK_DEFAULT_MAX_DEPTH,
+):
     visited_urls = set()
     pages_to_visit = deque([(base_url, 0)])
     discovered_pages = []
@@ -147,7 +148,9 @@ async def crawl_website_pages(base_url, session, max_pages=50, max_depth=3):
         discovered_pages.append(current_url)
 
         try:
-            async with session.get(current_url, timeout=10) as response:
+            async with session.get(
+                current_url, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS
+            ) as response:
                 if response.status != 200:
                     continue
 
@@ -188,7 +191,9 @@ async def crawl_website_pages(base_url, session, max_pages=50, max_depth=3):
 async def scrape_page_images(page_url, session):
     """Extract all image URLs from a single page."""
     try:
-        async with session.get(page_url, timeout=10) as response:
+        async with session.get(
+            page_url, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS
+        ) as response:
             if response.status != 200:
                 logger.warning(f"Failed to fetch page: {response.status}")
                 return []
@@ -198,8 +203,6 @@ async def scrape_page_images(page_url, session):
         soup = BeautifulSoup(html_content, "html.parser")
 
         image_urls = []
-
-        skip_extensions = {".svg", ".ico", ".webm", ".mp4", ".pdf", ".css", ".js"}
 
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src")
@@ -211,7 +214,7 @@ async def scrape_page_images(page_url, session):
                 continue
 
             url_lower = normalized_url.lower()
-            if any(url_lower.endswith(ext) for ext in skip_extensions):
+            if any(url_lower.endswith(ext) for ext in SCRAPE_SKIP_IMAGE_EXTENSIONS):
                 continue
 
             if normalized_url.startswith("data:"):

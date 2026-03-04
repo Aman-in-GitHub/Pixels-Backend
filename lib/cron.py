@@ -10,14 +10,17 @@ import tempfile
 import time
 from typing import Any
 
-import aiohttp
 import cv2
 import numpy as np
 from loguru import logger
 
 from lib.constants import (
     BATCH_SIZE,
+    CRON_BATCH_DELAY_SECONDS,
     CRON_INTERVAL,
+    DB_WRITE_CHUNK_SIZE,
+    DEFAULT_ASYNC_SEMAPHORE_LIMIT,
+    DEFAULT_THREAD_POOL_WORKERS,
     MAX_FILE_SIZE,
     MIN_CONFIDENCE,
     MIN_FILE_SIZE,
@@ -30,12 +33,19 @@ from lib.db import (
 )
 from lib.face_analyzer import face_analyzer
 from lib.faiss_manager import images_faiss_manager
+from lib.utils import (
+    build_face_embeddings_from_faces,
+    create_http_session,
+    unique_preserve_order,
+)
 
 http_session = None
 
-semaphore = asyncio.Semaphore(6)
+semaphore = asyncio.Semaphore(DEFAULT_ASYNC_SEMAPHORE_LIMIT)
 
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=DEFAULT_THREAD_POOL_WORKERS
+)
 
 IMG2DATASET_PROCESS_COUNT = max(1, min(16, os.cpu_count() or 4))
 
@@ -53,20 +63,7 @@ async def get_http_session():
     global http_session
 
     if http_session is None or http_session.closed:
-        connector = aiohttp.TCPConnector(
-            limit_per_host=100,
-            limit=600,
-        )
-
-        http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10),
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            },
-            connector=connector,
-            max_line_size=32768,
-            max_field_size=32768,
-        )
+        http_session = create_http_session(limit_per_host=100, limit=600)
 
     return http_session
 
@@ -85,24 +82,7 @@ def extract_face_embeddings(image_data: bytes) -> list[dict[str, Any]]:
         if len(faces) == 0:
             return []
 
-        face_embeddings = []
-
-        for face_index, face in enumerate(faces):
-            if not hasattr(face, "embedding") or face.embedding is None:
-                continue
-
-            if float(face.det_score) < MIN_CONFIDENCE:
-                continue
-
-            face_embeddings.append(
-                {
-                    "face_id": face_index,
-                    "embedding": face.embedding.tolist(),
-                    "bbox": face.bbox.tolist() if hasattr(face, "bbox") else [],
-                }
-            )
-
-        return face_embeddings
+        return build_face_embeddings_from_faces(faces, min_confidence=MIN_CONFIDENCE)
 
     except Exception as e:
         logger.error(f"Error extracting face embeddings: {e}")
@@ -327,7 +307,7 @@ async def build_face_results_cache(
     loop = asyncio.get_running_loop()
 
     unique_urls = [
-        url for url in dict.fromkeys(image_urls) if downloaded_images.get(url)
+        url for url in unique_preserve_order(image_urls) if downloaded_images.get(url)
     ]
     extraction_tasks = [
         loop.run_in_executor(executor, extract_face_embeddings, downloaded_images[url])
@@ -420,7 +400,7 @@ async def process_scraped_images() -> int:
             for record in batch_records:
                 batch_urls.extend(extract_image_urls(record))
 
-            unique_batch_urls = list(dict.fromkeys(batch_urls))
+            unique_batch_urls = unique_preserve_order(batch_urls)
 
             downloaded_images = await download_images_with_img2dataset(
                 unique_batch_urls
@@ -475,7 +455,7 @@ async def process_scraped_images() -> int:
             )
 
         if all_embeddings:
-            chunk_size = 25
+            chunk_size = DB_WRITE_CHUNK_SIZE
 
             for i in range(0, len(all_embeddings), chunk_size):
                 chunk = all_embeddings[i : i + chunk_size]
@@ -491,7 +471,7 @@ async def process_scraped_images() -> int:
             await images_faiss_manager.rebuild_images_index_from_db()
 
         if processed_record_ids:
-            chunk_size = 25
+            chunk_size = DB_WRITE_CHUNK_SIZE
 
             for i in range(0, len(processed_record_ids), chunk_size):
                 id_chunk = processed_record_ids[i : i + chunk_size]
@@ -562,9 +542,11 @@ async def process_scraped_images_for_embeddings():
                         logger.info("No more records to process, ending cycle")
                         break
 
-                    logger.info("Waiting 3 seconds before next batch...")
+                    logger.info(
+                        f"Waiting {CRON_BATCH_DELAY_SECONDS} seconds before next batch..."
+                    )
 
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(CRON_BATCH_DELAY_SECONDS)
 
                 cycle_end_time = time.perf_counter()
 

@@ -6,6 +6,11 @@ import faiss
 import numpy as np
 from loguru import logger
 
+from lib.constants import (
+    FAISS_DEFAULT_REBUILD_BATCH_SIZE,
+    FAISS_EMBEDDING_DIMENSION,
+    MATCHING_THRESHOLD,
+)
 from lib.db import fetch_embedded_image_ids, fetch_embedding_rows
 
 RecordData: TypeAlias = dict[str, Any]
@@ -23,7 +28,7 @@ class FAISSManager:
 
         self.metadata: dict[int, RecordData] = {}
 
-        self.embedding_dimension = 512
+        self.embedding_dimension = FAISS_EMBEDDING_DIMENSION
 
         self._load_or_create_index()
 
@@ -131,7 +136,10 @@ class FAISSManager:
             logger.error(f"Error adding embeddings: {e}")
 
     def search_matching_images(
-        self, query_embedding: list[float], k: int = 100, threshold: float = 0.3
+        self,
+        query_embedding: list[float],
+        k: int = 100,
+        threshold: float = MATCHING_THRESHOLD,
     ) -> list[RecordData]:
         index = self.index
         if index is None or index.ntotal == 0:
@@ -170,7 +178,9 @@ class FAISSManager:
         except Exception as e:
             logger.error(f"Error saving index: {e}")
 
-    async def rebuild_images_index_from_db(self, batch_size: int = 100000) -> None:
+    async def rebuild_images_index_from_db(
+        self, batch_size: int = FAISS_DEFAULT_REBUILD_BATCH_SIZE
+    ) -> None:
         logger.info("Rebuilding FAISS images index from database...")
 
         try:
@@ -223,7 +233,9 @@ class FAISSManager:
         except Exception as e:
             logger.error(f"Error rebuilding images index: {e}")
 
-    async def rebuild_video_index_from_db(self, batch_size: int = 100000) -> None:
+    async def rebuild_video_index_from_db(
+        self, batch_size: int = FAISS_DEFAULT_REBUILD_BATCH_SIZE
+    ) -> None:
         logger.info("Rebuilding FAISS video index from database...")
 
         try:

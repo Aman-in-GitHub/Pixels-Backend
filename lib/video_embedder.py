@@ -6,10 +6,19 @@ import imagehash
 from loguru import logger
 from PIL import Image
 
-from lib.constants import MAX_VIDEO_DURATION, MIN_CONFIDENCE
+from lib.constants import (
+    DEFAULT_VIDEO_FRAME_INTERVAL,
+    DEFAULT_VIDEO_SAMPLES_FALLBACK,
+    DUPLICATE_FRAME_HASH_THRESHOLD,
+    FRAME_MOTION_THRESHOLD,
+    MAX_VIDEO_DURATION,
+    VIDEO_DB_WRITE_CHUNK_SIZE,
+    VIDEO_FILE_EXTENSIONS,
+)
 from lib.db import insert_embedded_videos
 from lib.face_analyzer import face_analyzer
 from lib.faiss_manager import videos_faiss_manager
+from lib.utils import build_face_embeddings_from_faces
 
 
 def compute_frame_hash(frame):
@@ -25,7 +34,9 @@ def compute_frame_hash(frame):
         return None
 
 
-def is_duplicate_frame(current_hash, previous_hash, threshold=3):
+def is_duplicate_frame(
+    current_hash, previous_hash, threshold=DUPLICATE_FRAME_HASH_THRESHOLD
+):
     if previous_hash is None or current_hash is None:
         return False
 
@@ -44,7 +55,9 @@ def is_duplicate_frame(current_hash, previous_hash, threshold=3):
         return False
 
 
-def is_frame_worth_processing(frame, previous_frame, motion_threshold=10):
+def is_frame_worth_processing(
+    frame, previous_frame, motion_threshold=FRAME_MOTION_THRESHOLD
+):
     if previous_frame is None:
         return True
 
@@ -68,7 +81,7 @@ def is_frame_worth_processing(frame, previous_frame, motion_threshold=10):
 def create_embedding_from_videos(
     video_path,
     scraped_record,
-    frame_interval=30,
+    frame_interval=DEFAULT_VIDEO_FRAME_INTERVAL,
 ):
     if frame_interval <= 0:
         logger.error(
@@ -100,7 +113,7 @@ def create_embedding_from_videos(
 
             max_frames = int(MAX_VIDEO_DURATION * samples_per_second)
         else:
-            max_frames = 360
+            max_frames = DEFAULT_VIDEO_SAMPLES_FALLBACK
 
         duration = total_frames / fps if fps > 0 else 0
 
@@ -192,24 +205,7 @@ def extract_face_embeddings_from_frame(frame):
         if len(faces) == 0:
             return []
 
-        face_embeddings = []
-
-        for face_index, face in enumerate(faces):
-            if not hasattr(face, "embedding") or face.embedding is None:
-                continue
-
-            if float(face.det_score) < MIN_CONFIDENCE:
-                continue
-
-            face_embeddings.append(
-                {
-                    "face_id": face_index,
-                    "embedding": face.embedding.tolist(),
-                    "bbox": face.bbox.tolist() if hasattr(face, "bbox") else [],
-                }
-            )
-
-        return face_embeddings
+        return build_face_embeddings_from_faces(faces)
 
     except Exception as e:
         logger.error(f"Error extracting face embeddings from frame: {e}")
@@ -263,7 +259,7 @@ async def add_video_embeddings_to_faiss(video_embeddings_data):
             return False
 
         if records_list:
-            chunk_size = 100
+            chunk_size = VIDEO_DB_WRITE_CHUNK_SIZE
 
             for i in range(0, len(records_list), chunk_size):
                 chunk = records_list[i : i + chunk_size]
@@ -288,17 +284,17 @@ async def add_video_embeddings_to_faiss(video_embeddings_data):
         return False
 
 
-async def process_videos_from_folder_async(videos_folder_path, frame_interval=30):
+async def process_videos_from_folder_async(
+    videos_folder_path, frame_interval=DEFAULT_VIDEO_FRAME_INTERVAL
+):
     if not os.path.exists(videos_folder_path):
         logger.error(f"Videos folder not found: {videos_folder_path}")
         return False
 
-    video_extensions = [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm"]
-
     video_files = []
 
     for file in os.listdir(videos_folder_path):
-        if any(file.lower().endswith(ext) for ext in video_extensions):
+        if any(file.lower().endswith(ext) for ext in VIDEO_FILE_EXTENSIONS):
             video_files.append(os.path.join(videos_folder_path, file))
 
     if not video_files:
@@ -347,7 +343,9 @@ async def process_videos_from_folder_async(videos_folder_path, frame_interval=30
     return True
 
 
-def process_videos_from_folder(videos_folder_path, frame_interval=30):
+def process_videos_from_folder(
+    videos_folder_path, frame_interval=DEFAULT_VIDEO_FRAME_INTERVAL
+):
     return asyncio.run(
         process_videos_from_folder_async(videos_folder_path, frame_interval)
     )
@@ -358,7 +356,9 @@ if __name__ == "__main__":
 
     videos_folder = sys.argv[1] if len(sys.argv) > 1 else "videos"
 
-    frame_interval = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+    frame_interval = (
+        int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_VIDEO_FRAME_INTERVAL
+    )
 
     logger.info("Starting video embedding process...")
 

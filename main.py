@@ -8,6 +8,13 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from lib.constants import (
+    APP_LOG_LEVEL,
+    CORS_ALLOW_ALL,
+    ROOT_HELLO_MESSAGE,
+    STATIC_VIDEOS_DIR,
+    STATIC_VIDEOS_ROUTE,
+)
 from lib.cron import process_scraped_images_for_embeddings
 from lib.db import close_db_pool, init_db_pool
 from lib.faiss_manager import images_faiss_manager, videos_faiss_manager
@@ -19,7 +26,7 @@ from routes.verify_photo import router as verify_photo_router
 
 logger.remove()
 
-logger.add(sys.stdout, level="INFO")
+logger.add(sys.stdout, level=APP_LOG_LEVEL)
 
 background_task = None
 
@@ -66,10 +73,10 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOW_ALL,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=CORS_ALLOW_ALL,
+    allow_headers=CORS_ALLOW_ALL,
 )
 
 app.include_router(get_matching_images_router)
@@ -79,12 +86,12 @@ app.include_router(verify_photo_router)
 app.include_router(recheck_images_router)
 
 
-app.mount("/videos", StaticFiles(directory="videos"), name="videos")
+app.mount(STATIC_VIDEOS_ROUTE, StaticFiles(directory=STATIC_VIDEOS_DIR), name="videos")
 
 
 @app.get("/")
 async def root():
-    return {"success": True, "message": "Hello World!"}
+    return {"success": True, "message": ROOT_HELLO_MESSAGE}
 
 
 @app.get("/favicon.ico")

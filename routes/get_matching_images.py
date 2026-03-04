@@ -4,7 +4,6 @@ import base64
 import io
 from concurrent.futures import ThreadPoolExecutor
 
-import aiohttp
 import cv2
 import numpy as np
 from fastapi import APIRouter, File, UploadFile
@@ -13,25 +12,32 @@ from NudeNetv2 import NudeClassifier
 from PIL import Image
 
 from lib.constants import (
-    ALLOWED_IMAGE_TYPES,
+    DEFAULT_ASYNC_SEMAPHORE_LIMIT,
+    DEFAULT_THREAD_POOL_WORKERS,
+    IMAGE_MATCH_EXCLUDED_FIELDS,
     MATCHING_THRESHOLD,
     MAX_FILE_SIZE,
     MAX_MATCHING_RESULTS,
-    MIN_CONFIDENCE,
-    MIN_FILE_SIZE,
 )
 from lib.face_analyzer import face_analyzer
 from lib.faiss_manager import images_faiss_manager
+from lib.utils import (
+    create_http_session,
+    extract_single_face_from_image_data,
+    is_allowed_image_upload,
+    is_valid_file_size,
+    remove_keys,
+)
 
 router = APIRouter()
 
 http_session = None
 
-semaphore = asyncio.Semaphore(6)
+semaphore = asyncio.Semaphore(DEFAULT_ASYNC_SEMAPHORE_LIMIT)
 
 nude_classifier = NudeClassifier()
 
-executor = ThreadPoolExecutor(max_workers=6)
+executor = ThreadPoolExecutor(max_workers=DEFAULT_THREAD_POOL_WORKERS)
 
 
 def cleanup_resources():
@@ -45,17 +51,7 @@ async def get_http_session():
     global http_session
 
     if not http_session or http_session.closed:
-        connector = aiohttp.TCPConnector(limit_per_host=20, limit=120)
-
-        http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10),
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            },
-            connector=connector,
-            max_line_size=32768,
-            max_field_size=32768,
-        )
+        http_session = create_http_session(limit_per_host=20, limit=120)
 
     return http_session
 
@@ -128,11 +124,7 @@ async def download_and_process_image(url, bbox):
 
 
 async def process_single_match(match):
-    clean_match = {
-        k: v
-        for k, v in match.items()
-        if k not in ["embedding", "bbox", "confidence", "images", "embedded_image"]
-    }
+    clean_match = remove_keys(match, IMAGE_MATCH_EXCLUDED_FIELDS)
 
     bbox = match.get("bbox")
 
@@ -166,26 +158,11 @@ async def process_single_match(match):
 
 
 def process_input_image(image_data):
+    face, _, error_msg = extract_single_face_from_image_data(image_data, face_analyzer)
+    if not face:
+        return None, error_msg
+
     try:
-        pil_img = Image.open(io.BytesIO(image_data))
-
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
-
-        opencv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-
-        faces = face_analyzer.get(opencv_img)
-
-        if len(faces) == 0:
-            return None, "No faces detected"
-        if len(faces) > 1:
-            return None, "Multiple faces detected"
-
-        face = faces[0]
-
-        if face.det_score < MIN_CONFIDENCE:
-            return None, "Low confidence score"
-
         result = process_image_with_bbox(image_data, face.bbox)
 
         if not result:
@@ -202,13 +179,13 @@ def process_input_image(image_data):
 
 @router.post("/get-matching-images")
 async def get_matching_images(file: UploadFile = File(...)):
-    if not file or file.content_type not in ALLOWED_IMAGE_TYPES:
+    if not is_allowed_image_upload(file):
         return {"success": False, "message": "Invalid file"}
 
     try:
         image_data = await file.read()
 
-        if not (MIN_FILE_SIZE <= len(image_data) <= MAX_FILE_SIZE):
+        if not is_valid_file_size(image_data):
             return {"success": False, "message": "Invalid file size"}
 
         loop = asyncio.get_running_loop()

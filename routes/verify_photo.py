@@ -1,23 +1,21 @@
-import io
-
-import cv2
 import inspireface as isf
-import numpy as np
 from fastapi import APIRouter, File, UploadFile
 from loguru import logger
-from PIL import Image
 
 from lib.constants import (
-    ALLOWED_IMAGE_TYPES,
     FACE_QUALITY_THRESHOLD,
     MASK_THRESHOLD,
     MATCHING_THRESHOLD,
-    MAX_FILE_SIZE,
     MIN_CONFIDENCE,
-    MIN_FILE_SIZE,
     WINK_THRESHOLD,
 )
 from lib.face_analyzer import face_analyzer
+from lib.utils import (
+    compute_cosine_similarity,
+    extract_single_face_from_image_data,
+    is_allowed_image_upload,
+    is_valid_file_size,
+)
 
 isf.launch(resource_path="./models/Megatron")
 
@@ -31,7 +29,7 @@ def analyze_face_feature(opencv_img, feature_option, error_prefix):
             feature_option, isf.HF_DETECT_MODE_ALWAYS_DETECT
         )
 
-        session.set_detection_confidence_threshold(0.3)
+        session.set_detection_confidence_threshold(MIN_CONFIDENCE)
 
         faces = session.face_detection(opencv_img)
 
@@ -87,62 +85,17 @@ def check_winking(opencv_img):
     return None, None
 
 
-def compute_cosine_similarity(embedding1, embedding2):
-    norm1 = np.linalg.norm(embedding1)
-
-    norm2 = np.linalg.norm(embedding2)
-
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-
-    similarity = np.dot(embedding1, embedding2) / (norm1 * norm2)
-
-    return float(similarity)
-
-
-def process_input_image(image_data):
-    try:
-        pil_img = Image.open(io.BytesIO(image_data))
-
-        if pil_img.mode != "RGB":
-            pil_img = pil_img.convert("RGB")
-
-        opencv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-
-        faces = face_analyzer.get(opencv_img)
-
-        if len(faces) == 0:
-            return None, None, "No faces detected"
-
-        if len(faces) > 1:
-            return None, None, "Multiple faces detected"
-
-        face = faces[0]
-
-        if face.det_score < MIN_CONFIDENCE:
-            return None, None, "Low confidence score"
-
-        return face, opencv_img, None
-
-    except Exception as e:
-        logger.error(f"Input processing failed: {e}")
-        return None, None, "Face processing failed"
-
-
 @router.post("/verify-photo")
 async def verify_photo(
     original_photo: UploadFile = File(...), verification_photo: UploadFile = File(...)
 ):
-    if not original_photo or original_photo.content_type not in ALLOWED_IMAGE_TYPES:
+    if not is_allowed_image_upload(original_photo):
         return {
             "success": False,
             "message": "Invalid type",
         }
 
-    if (
-        not verification_photo
-        or verification_photo.content_type not in ALLOWED_IMAGE_TYPES
-    ):
+    if not is_allowed_image_upload(verification_photo):
         return {
             "success": False,
             "message": "Invalid type",
@@ -151,13 +104,15 @@ async def verify_photo(
     try:
         original_data = await original_photo.read()
 
-        if not (MIN_FILE_SIZE <= len(original_data) <= MAX_FILE_SIZE):
+        if not is_valid_file_size(original_data):
             return {
                 "success": False,
                 "message": "Invalid size",
             }
 
-        original_face, _, error_msg = process_input_image(original_data)
+        original_face, _, error_msg = extract_single_face_from_image_data(
+            original_data, face_analyzer
+        )
 
         if not original_face:
             return {
@@ -167,14 +122,14 @@ async def verify_photo(
 
         verification_data = await verification_photo.read()
 
-        if not (MIN_FILE_SIZE <= len(verification_data) <= MAX_FILE_SIZE):
+        if not is_valid_file_size(verification_data):
             return {
                 "success": False,
                 "message": "Invalid size",
             }
 
-        verification_face, verification_opencv_img, error_msg = process_input_image(
-            verification_data
+        verification_face, verification_opencv_img, error_msg = (
+            extract_single_face_from_image_data(verification_data, face_analyzer)
         )
 
         if not verification_face:
