@@ -2,6 +2,11 @@ import asyncio
 import atexit
 import concurrent.futures
 import io
+import json
+import os
+import pathlib
+import shutil
+import tempfile
 import time
 
 import aiohttp
@@ -26,6 +31,10 @@ http_session = None
 semaphore = asyncio.Semaphore(6)
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+
+IMG2DATASET_PROCESS_COUNT = max(1, min(16, os.cpu_count() or 4))
+
+IMG2DATASET_THREAD_COUNT = 64
 
 
 def cleanup_resources():
@@ -95,34 +104,132 @@ def extract_face_embeddings(image_data):
         return []
 
 
-async def download_and_process_image(image_url, session):
-    async with semaphore:
+def extract_image_urls(record):
+    images = record.get("images", [])
+
+    if not images:
+        return []
+
+    image_urls = []
+
+    for image_data in images:
+        image_url = image_data.get("src")
+
+        if image_url:
+            if image_url.startswith("/"):
+                image_url = f"https://{record['hostname']}{image_url}"
+            elif not image_url.startswith("http"):
+                image_url = f"https://{record['hostname']}/{image_url}"
+            image_urls.append(image_url)
+
+    return image_urls
+
+
+def resolve_downloaded_image_path(metadata_path, key):
+    parent_dir = metadata_path.parent
+    image_candidates = []
+
+    if key:
+        image_candidates.extend(parent_dir.glob(f"{key}.*"))
+
+    image_candidates.extend(parent_dir.glob(f"{metadata_path.stem}.*"))
+
+    for candidate in image_candidates:
+        if candidate.suffix.lower() not in {".json", ".txt"} and candidate.is_file():
+            return candidate
+
+    return None
+
+
+def collect_downloaded_images(output_folder):
+    downloaded_images = {}
+
+    for metadata_path in pathlib.Path(output_folder).rglob("*.json"):
+        if metadata_path.name.endswith("_stats.json"):
+            continue
+
         try:
-            async with session.get(image_url) as response:
-                if response.status != 200:
-                    return None
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"Failed to read img2dataset metadata {metadata_path}: {e}")
+            continue
 
-                image_data = await response.read()
+        if metadata.get("status") != "success":
+            continue
 
-                if not (MIN_FILE_SIZE <= len(image_data) <= MAX_FILE_SIZE):
-                    return None
+        source_url = metadata.get("url")
 
-            loop = asyncio.get_running_loop()
+        if not source_url or source_url in downloaded_images:
+            continue
 
-            face_embeddings = await loop.run_in_executor(
-                executor, extract_face_embeddings, image_data
+        image_path = resolve_downloaded_image_path(metadata_path, metadata.get("key"))
+
+        if not image_path:
+            continue
+
+        try:
+            image_data = image_path.read_bytes()
+        except Exception as e:
+            logger.warning(f"Failed to read downloaded image {image_path}: {e}")
+            continue
+
+        if MIN_FILE_SIZE <= len(image_data) <= MAX_FILE_SIZE:
+            downloaded_images[source_url] = image_data
+
+    return downloaded_images
+
+
+async def download_images_with_img2dataset(image_urls):
+    if not image_urls:
+        return {}
+
+    tmp_dir = tempfile.mkdtemp(prefix="img2dataset_cron_")
+
+    try:
+        url_list_path = pathlib.Path(tmp_dir) / "urls.txt"
+        output_folder = pathlib.Path(tmp_dir) / "output"
+
+        output_folder.mkdir(parents=True, exist_ok=True)
+        url_list_path.write_text("\n".join(image_urls), encoding="utf-8")
+
+        process = await asyncio.create_subprocess_exec(
+            "img2dataset",
+            f"--url_list={url_list_path}",
+            "--input_format=txt",
+            f"--output_folder={output_folder}",
+            "--output_format=files",
+            f"--processes_count={IMG2DATASET_PROCESS_COUNT}",
+            f"--thread_count={IMG2DATASET_THREAD_COUNT}",
+            "--number_sample_per_shard=10000",
+            "--resize_mode=no",
+            "--enable_wandb=False",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr_data = await process.communicate()
+
+        if process.returncode != 0:
+            stderr_text = stderr_data.decode("utf-8", errors="ignore")
+            raise RuntimeError(
+                f"img2dataset failed with code {process.returncode}: {stderr_text}"
             )
 
-            logger.info(f"Found {len(face_embeddings)} faces in {image_url}")
+        downloaded_images = collect_downloaded_images(output_folder)
 
-            if face_embeddings:
-                return face_embeddings
+        logger.info(
+            f"img2dataset downloaded {len(downloaded_images)}/{len(image_urls)} images"
+        )
 
-            return None
+        return downloaded_images
 
-        except Exception:
-            logger.warning(f"Failed to process {image_url}")
-            return None
+    except FileNotFoundError:
+        raise RuntimeError(
+            "img2dataset binary not found. Install img2dataset to use cron downloader."
+        )
+    except Exception as e:
+        raise RuntimeError(f"img2dataset download failed: {e}") from e
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def create_embedding_record(scraped_record, image_url, face_data):
@@ -145,41 +252,44 @@ def create_embedding_record(scraped_record, image_url, face_data):
         return None
 
 
-async def process_single_record(record, session):
+async def process_single_record(record, downloaded_images):
     try:
-        images = record.get("images", [])
-
-        if not images:
-            return []
-
-        image_urls = []
-
-        for image_data in images:
-            image_url = image_data.get("src")
-
-            if image_url:
-                if image_url.startswith("/"):
-                    image_url = f"https://{record['hostname']}{image_url}"
-                elif not image_url.startswith("http"):
-                    image_url = f"https://{record['hostname']}/{image_url}"
-                image_urls.append(image_url)
+        image_urls = extract_image_urls(record)
 
         if not image_urls:
             return []
 
-        image_results = await asyncio.gather(
-            *[download_and_process_image(url, session) for url in image_urls],
-            return_exceptions=True,
-        )
+        loop = asyncio.get_running_loop()
+
+        candidate_urls = []
+        extraction_tasks = []
+
+        for url in image_urls:
+            image_data = downloaded_images.get(url)
+
+            if not image_data:
+                continue
+
+            candidate_urls.append(url)
+            extraction_tasks.append(
+                loop.run_in_executor(executor, extract_face_embeddings, image_data)
+            )
+
+        if not extraction_tasks:
+            return []
+
+        image_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
 
         all_embeddings = []
 
-        for url, result in zip(image_urls, image_results):
+        for url, result in zip(candidate_urls, image_results):
             if isinstance(result, Exception):
                 logger.warning(f"Error processing {url}: {result}")
                 continue
 
             if result:
+                logger.info(f"Found {len(result)} faces in {url}")
+
                 for face_data in result:
                     embedding_record = create_embedding_record(record, url, face_data)
 
@@ -211,8 +321,6 @@ async def process_scraped_images():
 
         logger.info(f"Processing {len(scraped_records)} records...")
 
-        session = await get_http_session()
-
         batch_size = 25
 
         total_processed = 0
@@ -224,8 +332,21 @@ async def process_scraped_images():
         for i in range(0, len(scraped_records), batch_size):
             batch_records = scraped_records[i : i + batch_size]
 
+            batch_urls = []
+            for record in batch_records:
+                batch_urls.extend(extract_image_urls(record))
+
+            unique_batch_urls = list(dict.fromkeys(batch_urls))
+
+            downloaded_images = await download_images_with_img2dataset(
+                unique_batch_urls
+            )
+
             batch_results = await asyncio.gather(
-                *[process_single_record(record, session) for record in batch_records],
+                *[
+                    process_single_record(record, downloaded_images)
+                    for record in batch_records
+                ],
                 return_exceptions=True,
             )
 
